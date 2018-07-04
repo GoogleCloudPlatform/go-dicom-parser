@@ -201,7 +201,7 @@ func createIteratorFromFile(file string) (DataElementIterator, error) {
 
 func openFile(name string) (io.Reader, error) {
 	var p = path.Join("../",
-		"testdata/+name)
+		"testdata/"+name)
 
 	return os.Open(p)
 }
