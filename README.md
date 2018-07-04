@@ -7,7 +7,7 @@ The Go DICOM parser is a library to parse DICOM files.
 ### Installing
 To start using, install Go 1.8 or above and run `go get`:
 ```sh
-go get github.com/googlecloudplatform/go-dicom-parser
+go get github.com/googlecloudplatform/go-dicom-parser/dicom
 ```
 This will download the library source code into your `$GOPATH`
 
@@ -28,7 +28,10 @@ func main() {
   if err != nil {
     log.Fatalf("os.Open(_) => %v", err)
   }
-  dataSet := dicom.Parse(r)
+  dataSet, err := dicom.Parse(r)
+  if err != nil {
+    log.Fatalf("dicom.Parse(_) => %v", err)
+  }
 
   for tag, element := range dataSet.Elements {
     fmt.Println(tag, element.VR, element.ValueField)
