@@ -18,15 +18,17 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-
 )
 
 // DataElementIterator represents an iterator over a DataSet's DataElements
 type DataElementIterator interface {
-	io.Closer
-	// NextElement returns the next DataElement in the DataSet. If there is no next DataElement,
-	// (nil, io.EOF) is returned
+	// NextElement returns the next DataElement in the DataSet. If there is no next DataElement, the
+	// error io.EOF is returned. In Addition, if any previously returned DataElements contained
+	// iterable objects like SequenceIterator, BulkDataIterator, these iterators are emptied.
 	NextElement() (*DataElement, error)
+
+	// Close discards all remaining DataElements in the iterator
+	Close() error
 
 	syntax() transferSyntax
 }
@@ -49,12 +51,13 @@ func NewDataElementIterator(r io.Reader) (DataElementIterator, error) {
 		return nil, fmt.Errorf("finding transfer syntax: %v", err)
 	}
 
-	metaIter, err := newDataElementIterator(newDcmReader(bytes.NewBuffer(metaHeaderBytes)), defaultEncoding)
+	metaIter, err := newDataElementIterator(newDcmReader(bytes.NewBuffer(metaHeaderBytes)), defaultMetaData)
 	if err != nil {
 		return nil, fmt.Errorf("creating meta element iterator: %v", err)
 	}
 
-	return &dataElementIterator{dr, dicomMetaData{syntax, isoIR6}, nil, false, metaIter}, nil
+	metadata := dicomMetaData{syntax, defaultCharacterRepertoire}
+	return &dataElementIterator{dr, metadata, nil, false, metaIter}, nil
 }
 
 // newDataElementIterator creates a DataElementIterator from a byte stream that excludes header info
@@ -158,7 +161,7 @@ func bufferMetadataHeader(dr *dcmReader) ([]byte, error) {
 		return nil, fmt.Errorf("buffering bytes of File​Meta​Information​Group​Length: %v", err)
 	}
 	firstElem, err := parseDataElement(
-		newDcmReader(bytes.NewBuffer(firstElemBytes)), defaultEncoding)
+		newDcmReader(bytes.NewBuffer(firstElemBytes)), defaultMetaData)
 	if err != nil {
 		return nil, fmt.Errorf("parsing FileMetaInformationGroupLength element: %v", err)
 	}
@@ -180,7 +183,7 @@ func bufferMetadataHeader(dr *dcmReader) ([]byte, error) {
 func findSyntax(metaHeaderBytes []byte) (transferSyntax, error) {
 	var syntax transferSyntax
 	metaDCMReader := newDcmReader(bytes.NewBuffer(metaHeaderBytes))
-	metaIter, err := newDataElementIterator(metaDCMReader, defaultEncoding)
+	metaIter, err := newDataElementIterator(metaDCMReader, defaultMetaData)
 	if err != nil {
 		return syntax, fmt.Errorf("creating iterator for file meta elements: %v", err)
 	}

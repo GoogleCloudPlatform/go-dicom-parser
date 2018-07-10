@@ -16,7 +16,9 @@ package dicom
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
+	"os"
 	"testing"
 )
 
@@ -39,7 +41,7 @@ func TestParse(t *testing.T) {
 				explicitVRLittleEndian,
 				nil,
 			},
-			createExpectedDataSet(bufferedPixelData, ExplicitVRLittleEndianUID),
+			createExpectedDataSet(bufferedPixelData, 198, ExplicitVRLittleEndianUID),
 		},
 		{
 			"Parse Explicit VR Little Endian with undefined lengths",
@@ -48,7 +50,16 @@ func TestParse(t *testing.T) {
 				explicitVRLittleEndian,
 				nil,
 			},
-			createExpectedDataSet(bufferedPixelData, ExplicitVRLittleEndianUID),
+			createExpectedDataSet(bufferedPixelData, 198, ExplicitVRLittleEndianUID),
+		},
+		{
+			"Parse Implicit VR Little Endian",
+			parseInput{
+				"ImplicitVRLittleEndian.dcm",
+				implicitVRLittleEndian,
+				nil,
+			},
+			createExpectedDataSet(bufferedPixelData, 196, ImplicitVRLittleEndianUID),
 		},
 		{
 			"when given an option that transforms BulkDataIterators, that transformation is respected",
@@ -57,7 +68,7 @@ func TestParse(t *testing.T) {
 				explicitVRLittleEndian,
 				[]ParseOption{ReferenceBulkData(DefaultBulkDataDefinition)},
 			},
-			createExpectedDataSet(referencedPixelDataElement(428, 4), ExplicitVRLittleEndianUID),
+			createExpectedDataSet(referencedPixelDataElement(428, 4), 198, ExplicitVRLittleEndianUID),
 		},
 		{
 			"when no options transform BulkDataIterators, we still buffer BulkDataIterators",
@@ -66,7 +77,7 @@ func TestParse(t *testing.T) {
 				explicitVRLittleEndian,
 				[]ParseOption{excludeTagRange(10, 10)},
 			},
-			createExpectedDataSet(bufferedPixelData, ExplicitVRLittleEndianUID),
+			createExpectedDataSet(bufferedPixelData, 198, ExplicitVRLittleEndianUID),
 		},
 	}
 
@@ -97,9 +108,9 @@ func TestParse_filteringOption(t *testing.T) {
 			parseInput{
 				"ExplicitVRLittleEndian.dcm",
 				explicitVRLittleEndian,
-				[]ParseOption{excludeTagRange(0x00081150, 0x00081150)},
+				[]ParseOption{excludeTagRange(ReferencedImageSequenceTag, ReferencedImageSequenceTag)},
 			},
-			0x00081150,
+			ReferencedImageSequenceTag,
 		},
 	}
 
@@ -115,7 +126,7 @@ func TestParse_filteringOption(t *testing.T) {
 
 func TestParse_filteringNestedSeq(t *testing.T) {
 	seqTag := uint32(0x00081110)
-	nestedSeqTag := uint32(0x00081150)
+	nestedSeqTag := uint32(ReferencedImageSequenceTag)
 	ds := parse("ExplicitVRLittleEndian.dcm", t, excludeTagRange(nestedSeqTag, nestedSeqTag))
 	seqElement, ok := ds.Elements[seqTag]
 	if !ok {
@@ -130,6 +141,105 @@ func TestParse_filteringNestedSeq(t *testing.T) {
 	}
 	if _, ok := seq.Items[0].Elements[nestedSeqTag]; ok {
 		t.Fatalf("expected nested sequence to be filtered")
+	}
+}
+
+func TestParse_utf8Encoding(t *testing.T) {
+	dataSet := parse("Encoding_ISO_IR_13.dcm", t, UTF8TextOption())
+	element, ok := dataSet.Elements[ViewNameTag]
+	if !ok {
+		t.Fatalf("expected tag %v to be in the returned data set", ViewNameTag)
+	}
+	want := &DataElement{ViewNameTag, SHVR, []string{"ｦﾂﾐﾑ"}, 4}
+	compareDataElements(element, want, binary.LittleEndian, t)
+}
+
+func TestParse_multiFrameSupport(t *testing.T) {
+	frames := [][]byte{
+		[]byte("4\022xV\252\231"),
+		[]byte("\356\335\000\377\021\000"),
+		[]byte("UDwf\231\210"),
+		[]byte("\335\314\377\356\021\000"),
+	}
+	frameRefsUncompressed := []BulkDataReference{
+		{ByteRegion{452, 6}},
+		{ByteRegion{458, 6}},
+		{ByteRegion{464, 6}},
+		{ByteRegion{470, 6}},
+	}
+	frameRefsCompressed := []BulkDataReference{
+		{ByteRegion{422, 0}},
+		{ByteRegion{430, 6}},
+		{ByteRegion{444, 6}},
+		{ByteRegion{458, 6}},
+		{ByteRegion{472, 6}},
+	}
+
+	tests := []struct {
+		name string
+		file string
+		opts []ParseOption
+		want *DataElement
+	}{
+		{
+			"when the file is in encapsulated format, fragments are untouched",
+			"MultiFrameCompressed.dcm",
+			[]ParseOption{SplitUncompressedPixelDataFrames()},
+			&DataElement{PixelDataTag, OBVR, append([][]byte{{}}, frames...), 24},
+		},
+		{
+			"when the file is encapsulated format and the ReferenceBulkData is used, " +
+				"the fragments are untouched",
+			"MultiFrameCompressed.dcm",
+			[]ParseOption{SplitUncompressedPixelDataFrames(), ReferenceBulkData(DefaultBulkDataDefinition)},
+			&DataElement{PixelDataTag, OBVR, frameRefsCompressed, 24},
+		},
+		{
+			"when the file is native format, fragments are transformed into frames",
+			"MultiFrameUncompressed.dcm",
+			[]ParseOption{SplitUncompressedPixelDataFrames()},
+			&DataElement{PixelDataTag, OWVR, frames, 24},
+		},
+		{
+			"when the file is native format, and given ReferenceBulkData, fragments are " +
+				"transformed into frame refs",
+			"MultiFrameUncompressed.dcm",
+			[]ParseOption{SplitUncompressedPixelDataFrames(), ReferenceBulkData(DefaultBulkDataDefinition)},
+			&DataElement{PixelDataTag, OWVR, frameRefsUncompressed, 24},
+		},
+		{
+			"when given SplitUncompressedPixelDataFrames and UTF8TextOption, frames are not affected by UTF-8",
+			"MultiFrameUncompressed.dcm",
+			[]ParseOption{UTF8TextOption(), SplitUncompressedPixelDataFrames()},
+			&DataElement{PixelDataTag, OWVR, frames, 24},
+		},
+		{
+			"When given UTF8TextOption, SplitUncompressedPixelDataFrames, ReferenceBulkData, UTF-8 streaming " +
+				"does not affect the offsets within references",
+			"MultiFrameUncompressed.dcm",
+			[]ParseOption{UTF8TextOption(), SplitUncompressedPixelDataFrames(), ReferenceBulkData(DefaultBulkDataDefinition)},
+			&DataElement{PixelDataTag, OWVR, frameRefsUncompressed, 24},
+		},
+		{
+			"When given SplitUncompressedPixelDataFrames, UTF8TextOption, ReferenceBulkData, UTF-8 streaming " +
+				"does not affect the offsets within references",
+			"MultiFrameUncompressed.dcm",
+			[]ParseOption{SplitUncompressedPixelDataFrames(), UTF8TextOption(), ReferenceBulkData(DefaultBulkDataDefinition)},
+			&DataElement{PixelDataTag, OWVR, frameRefsUncompressed, 24},
+		},
+		{
+			"DropBasicOffsetTable option can be used with this option",
+			"MultiFrameCompressed.dcm",
+			[]ParseOption{DropBasicOffsetTable, SplitUncompressedPixelDataFrames(), ReferenceBulkData(DefaultBulkDataDefinition)},
+			&DataElement{PixelDataTag, OBVR, frameRefsCompressed[1:], 24},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dataSet := parse(tc.file, t, tc.opts...)
+			compareDataElements(dataSet.Elements[PixelDataTag], tc.want, binary.LittleEndian, t)
+		})
 	}
 }
 
@@ -281,6 +391,30 @@ func TestBufferBulkData(t *testing.T) {
 	}
 }
 
+func ExampleParse() {
+	r, err := os.Open("example.dcm")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	dataSet, err := Parse(r)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	for _, element := range dataSet.Elements {
+		if sequence, ok := element.ValueField.(*Sequence); ok {
+			for _, item := range sequence.Items {
+				for _, element := range item.Elements {
+					fmt.Println("sequence item element", element)
+				}
+			}
+		}
+		fmt.Println(element)
+	}
+}
+
 type emptyBulkDataIterator struct{}
 
 func (emptyBulkDataIterator) Next() (*BulkDataReader, error) {
@@ -312,18 +446,26 @@ func referencedPixelDataElement(offset, length int) *DataElement {
 	return createDataElement(PixelDataTag, OWVR, refs, uint32(length))
 }
 
-func createExpectedDataSet(pixelElement *DataElement, transferSyntaxUID string) *DataSet {
+func createExpectedDataSet(pixelElement *DataElement, metaLength uint32, transferSyntaxUID string) *DataSet {
 	expectedDataSet := &DataSet{map[uint32]*DataElement{}}
 
 	for _, elem := range expectedElements {
 		expectedDataSet.Elements[uint32(elem.Tag)] = elem
 	}
 
+	expectedDataSet.Elements[FileMetaInformationGroupLengthTag] = &DataElement{
+		FileMetaInformationGroupLengthTag,
+		ULVR,
+		[]uint32{metaLength},
+		4,
+	}
+	expectedDataSet.Elements[TransferSyntaxUIDTag] = &DataElement{
+		TransferSyntaxUIDTag,
+		UIVR,
+		[]string{transferSyntaxUID},
+		uint32(len(transferSyntaxUID)),
+	}
 	expectedDataSet.Elements[PixelDataTag] = pixelElement
-	transferSyntaxElement := &DataElement{
-		TransferSyntaxUIDTag, UIVR,
-		[]string{transferSyntaxUID}, uint32(len(transferSyntaxUID))}
-	expectedDataSet.Elements[TransferSyntaxUIDTag] = transferSyntaxElement
 
 	return expectedDataSet
 }

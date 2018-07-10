@@ -16,13 +16,14 @@ package dicom
 
 import (
 	"bytes"
+	"encoding/binary"
+	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"path"
 	"reflect"
 	"testing"
-
-	"encoding/binary"
 
 	
 )
@@ -31,7 +32,7 @@ var (
 	nestedDataSetElement = createDataElement(0x00081155, UIVR,
 		[]string{"1.2.840.10008.5.1.4.1.1.4"}, 26)
 	nestedSeq         = createSingletonSequence(nestedDataSetElement)
-	seq               = createSingletonSequence(createDataElement(0x00081150, SQVR, &nestedSeq, 42))
+	seq               = createSingletonSequence(createDataElement(ReferencedImageSequenceTag, SQVR, &nestedSeq, 42))
 	bufferedPixelData = createDataElement(PixelDataTag, OWVR, [][]byte{{0x11, 0x11, 0x22, 0x22}}, 4)
 	expectedElements  = []*DataElement{
 		createDataElement(0x00020000, ULVR, []uint32{198}, 4),
@@ -58,19 +59,25 @@ func TestIterator_NextElement(t *testing.T) {
 			"Explicit Lengths, Explicit VR, Little Endian",
 			"ExplicitVRLittleEndian.dcm",
 			explicitVRLittleEndian,
-			createExpectedDataSet(bufferedPixelData, ExplicitVRLittleEndianUID),
+			createExpectedDataSet(bufferedPixelData, 198, ExplicitVRLittleEndianUID),
 		},
 		{
 			"Undefined Sequence & Item lengths, Explicit VR, Little Endian",
 			"ExplicitVRLittleEndianUndefLen.dcm",
 			explicitVRLittleEndian,
-			createExpectedDataSet(bufferedPixelData, ExplicitVRLittleEndianUID),
+			createExpectedDataSet(bufferedPixelData, 198, ExplicitVRLittleEndianUID),
 		},
 		{
 			"Explicit Length, Explicit VR, Big Endian",
 			"ExplicitVRBigEndian.dcm",
 			explicitVRBigEndian,
-			createExpectedDataSet(bufferedPixelData, ExplicitVRBigEndianUID),
+			createExpectedDataSet(bufferedPixelData, 198, ExplicitVRBigEndianUID),
+		},
+		{
+			"Explicit Lengths, Implicit VR Little Endian",
+			"ImplicitVRLittleEndian.dcm",
+			implicitVRLittleEndian,
+			createExpectedDataSet(bufferedPixelData, 196, ImplicitVRLittleEndianUID),
 		},
 	}
 
@@ -107,7 +114,7 @@ func TestIterator_Close(t *testing.T) {
 }
 
 func TestIterator_atEndOfInput(t *testing.T) {
-	iter, err := newDataElementIterator(dcmReaderFromBytes(nil), defaultEncoding)
+	iter, err := newDataElementIterator(dcmReaderFromBytes(nil), defaultMetaData)
 	if err != nil {
 		t.Fatalf("unexepcted error: %v", err)
 	}
@@ -122,6 +129,31 @@ func TestEmptyIterator(t *testing.T) {
 	_, err := iter.NextElement()
 	if err != io.EOF {
 		t.Fatalf("expected empty iterator to return io.EOF: got %v, want %v", err, io.EOF)
+	}
+}
+
+func ExampleDataElementIterator() {
+	r, err := os.Open("multiframe_image.dcm")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	iter, err := NewDataElementIterator(r)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	for element, err := iter.NextElement(); err != io.EOF; element, err = iter.NextElement() {
+		if element.Tag != PixelDataTag { // skip elements until pixel data is encountered
+			continue
+		}
+		if fragments, ok := element.ValueField.(BulkDataIterator); ok {
+			for fragment, err := fragments.Next(); err != io.EOF; fragment, err = fragments.Next() {
+				ioutil.ReadAll(fragment) // process image fragment
+			}
+		}
 	}
 }
 
@@ -200,8 +232,7 @@ func createIteratorFromFile(file string) (DataElementIterator, error) {
 }
 
 func openFile(name string) (io.Reader, error) {
-	var p = path.Join("../",
-		"testdata/"+name)
+	p := path.Join("../", "testdata/"+name)
 
 	return os.Open(p)
 }

@@ -32,10 +32,13 @@ func (seq *Sequence) append(dataSet *DataSet) {
 // SequenceIterator is an iterator over a DICOM Sequence of Items in the order in which they appear
 // in the DICOM file.
 type SequenceIterator interface {
-	io.Closer
 	// Next returns the next item in the DICOM Sequence of Items. If there is no next item, the error
-	// io.EOF is returned.
+	// io.EOF is returned. In addition, any previously returned iterators from Next are emptied.
 	Next() (DataElementIterator, error)
+
+	// Close discards all remaining items in the iterator. In addition, any previously returned
+	// iterators from calls to Next are emptied.
+	Close() error
 }
 
 func newSequenceIterator(dr *dcmReader, length uint32, metaData dicomMetaData) (SequenceIterator, error) {

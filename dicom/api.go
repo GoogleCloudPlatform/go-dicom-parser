@@ -12,6 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package dicom provides functions and data structures for manipulating the DICOM file format.
+// The package provides two ways of parsing the DICOM format. The simplest of these two ways is the
+// Parse function, which by default returns all the Data Elements of the DICOM object buffered in
+// memory as a DataSet. The more complicated of these two is the DataElementIterator which returns
+// DataElements one at a time and does not buffer.
+//
+// The Parse function and the DataElementIterator represent the ValueField of DataElements
+// differently. The Parse function by default buffers VRs of potentially enormous size
+// (SQ, OX, UN, UT, UR, UC) into memory. In contrast, the DataElementIterator does not buffer these
+// VRs and instead represents them as streaming interfaces. This is particularly useful for heavy
+// image processing.
 package dicom
 
 import (
@@ -31,7 +42,7 @@ import (
 // []uint32 for OL
 // []float64 for OD
 // []float32 for OF
-// []string for UR, UT
+// []string for UR, UT, UC
 // This behaviour can be overridden by supplying a ParseOption that transforms DataElements with
 // ValueField of type BulkDataIterator to a ValueField other than BulkDataIterator.
 func Parse(r io.Reader, opts ...ParseOption) (*DataSet, error) {

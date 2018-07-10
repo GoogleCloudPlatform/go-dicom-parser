@@ -23,10 +23,6 @@ import (
 )
 
 func parseDataElement(dr *dcmReader, metaData dicomMetaData) (*DataElement, error) {
-	if metaData.syntax.Implicit {
-		return nil, errors.New("implicit VR not supported yet")
-	}
-
 	tag, err := dr.Tag(metaData.syntax.ByteOrder)
 	if err == io.EOF {
 		return nil, io.EOF
@@ -48,7 +44,7 @@ func parseDataElement(dr *dcmReader, metaData dicomMetaData) (*DataElement, erro
 		return nil, io.EOF
 	}
 
-	vr, err := parseVR(dr)
+	vr, err := parseVR(dr, tag, metaData.syntax)
 	if err != nil {
 		return nil, fmt.Errorf("getting vr %v", err)
 	}
@@ -67,6 +63,10 @@ func parseDataElement(dr *dcmReader, metaData dicomMetaData) (*DataElement, erro
 }
 
 func parseValueLength(dr *dcmReader, vr *VR, metaData dicomMetaData) (uint32, error) {
+	if metaData.syntax.Implicit {
+		return dr.UInt32(metaData.syntax.ByteOrder)
+	}
+
 	// For explicit VR, lengths can be stored in a 32 bit field or a 16 bit field
 	// depending on the VR type. The 2 cases are defined at the link:
 	// http://dicom.nema.org/medical/dicom/current/output/html/part05.html#sect_7.1.2
@@ -194,7 +194,11 @@ func parseSequence(dr *dcmReader, length uint32, metaData dicomMetaData) (Sequen
 	return newSequenceIterator(dr, length, metaData)
 }
 
-func parseVR(dr *dcmReader) (*VR, error) {
+func parseVR(dr *dcmReader, tag DataElementTag, syntax transferSyntax) (*VR, error) {
+	if syntax.Implicit {
+		return tag.DictionaryVR(), nil
+	}
+
 	vrString, err := dr.String(2)
 	if err != nil {
 		return nil, fmt.Errorf("getting vr %v", vrString)

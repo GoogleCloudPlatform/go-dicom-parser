@@ -8,5 +8,4 @@ type dicomMetaData struct {
 	encoding encoding.Encoding
 }
 
-var defaultEncoding = dicomMetaData{explicitVRLittleEndian, isoIR6}
-
+var defaultMetaData = dicomMetaData{explicitVRLittleEndian, defaultCharacterRepertoire}

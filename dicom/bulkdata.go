@@ -49,12 +49,14 @@ func (r *BulkDataReader) Close() error {
 
 // BulkDataIterator represents a sequence of BulkDataReaders.
 type BulkDataIterator interface {
-	io.Closer
-
 	// Next returns the next BulkDataReader in the iterator and discards all bytes from all previous
 	// BulkDataReaders returned from Next. If there are no remaining BulkDataReader in the iterator,
-	// (nil, io.EOF) is returned
+	// the error io.EOF is returned
 	Next() (*BulkDataReader, error)
+
+	// Close discards all remaining BulkDataReaders in the iterator. Any previously returned
+	// BulkDataReaders from calls to Next are also emptied.
+	Close() error
 }
 
 // oneShotIterator is a BulkDataIterator that contains exactly one BulkDataReader

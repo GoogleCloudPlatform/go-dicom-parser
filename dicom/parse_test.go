@@ -344,23 +344,47 @@ func TestParseByteSequence(t *testing.T) {
 }
 
 func TestParseVR_invalid(t *testing.T) {
-	_, err := parseVR(dcmReaderFromBytes([]byte("ZZ")))
+	_, err := parseVR(dcmReaderFromBytes([]byte("ZZ")), DataElementTag(0), explicitVRLittleEndian)
 	if err == nil {
 		t.Fatalf("expected error to be returned")
 	}
 }
 
 func TestParseVR(t *testing.T) {
-	vr, err := parseVR(dcmReaderFromBytes([]byte("US")))
-	if err != nil {
-		t.Fatalf("parseVR(_) => %v", err)
+	tests := []struct {
+		name   string
+		bytes  []byte
+		tag    DataElementTag
+		syntax transferSyntax
+		want   *VR
+	}{
+		{
+			"when in the explicit VR syntax, the data dictionary specified VR is ignored",
+			[]byte("US"),
+			DataElementTag(0),
+			explicitVRLittleEndian,
+			USVR,
+		},
+		{
+			"when in the implicit VR syntax, the data dictionary VR is returned",
+			[]byte{},
+			OverlayRowsTag,
+			implicitVRLittleEndian,
+			USVR,
+		},
 	}
 
-	if vr != USVR {
-		t.Fatalf("got %v, want %v", vr, USVR)
+	for _, tc := range tests {
+		vr, err := parseVR(dcmReaderFromBytes(tc.bytes), tc.tag, tc.syntax)
+		if err != nil {
+			t.Fatalf("parseVR(_) => %v", err)
+		}
+		if vr != tc.want {
+			t.Fatalf("got %v, want %v", vr, tc.want)
+		}
 	}
 }
 
 func metaDataWithSyntax(syntax transferSyntax) dicomMetaData {
-	return dicomMetaData{syntax, isoIR6}
+	return dicomMetaData{syntax, defaultCharacterRepertoire}
 }
