@@ -57,6 +57,8 @@ type BulkDataIterator interface {
 	// Close discards all remaining BulkDataReaders in the iterator. Any previously returned
 	// BulkDataReaders from calls to Next are also emptied.
 	Close() error
+
+	write(w io.Writer, syntax transferSyntax) error
 }
 
 // oneShotIterator is a BulkDataIterator that contains exactly one BulkDataReader
@@ -89,23 +91,29 @@ func (it *oneShotIterator) Close() error {
 	return nil
 }
 
-// EncapsulatedFormatIterator represents image pixel data (7FE0,0010) in encapsulated format as
+func (it *oneShotIterator) write(w io.Writer, syntax transferSyntax) error {
+	return writeByteFragments(w, func() (io.Reader, error) {
+		return it.Next()
+	})
+}
+
+// encapsulatedFormatIterator represents image pixel data (7FE0,0010) in encapsulated format as
 // described in http://dicom.nema.org/medical/dicom/current/output/html/part05.html#sect_A.4.
-type EncapsulatedFormatIterator struct {
+type encapsulatedFormatIterator struct {
 	dr            *dcmReader
 	currentReader *BulkDataReader
 	empty         bool
 }
 
 func newEncapsulatedFormatIterator(dr *dcmReader) (BulkDataIterator, error) {
-	return &EncapsulatedFormatIterator{dr, nil, false}, nil
+	return &encapsulatedFormatIterator{dr, nil, false}, nil
 }
 
 // Next returns the next fragment of the pixel data. The first return from Next will be the
 // Basic Offset Table if present or an empty BulkDataReader otherwise. When Next is called,
 // any previously returned BulkDataReaders from previous calls to Next will be emptied. When there
 // are no remaining fragments in the iterator, the error io.EOF is returned.
-func (it *EncapsulatedFormatIterator) Next() (*BulkDataReader, error) {
+func (it *encapsulatedFormatIterator) Next() (*BulkDataReader, error) {
 	if it.empty {
 		return nil, io.EOF
 	}
@@ -139,7 +147,7 @@ func (it *EncapsulatedFormatIterator) Next() (*BulkDataReader, error) {
 }
 
 // Close discards all fragments in the iterator
-func (it *EncapsulatedFormatIterator) Close() error {
+func (it *encapsulatedFormatIterator) Close() error {
 	for r, err := it.Next(); err != io.EOF; r, err = it.Next() {
 		if err != nil {
 			return fmt.Errorf("reading next reader: %v", err)
@@ -152,11 +160,68 @@ func (it *EncapsulatedFormatIterator) Close() error {
 	return nil
 }
 
-func (it *EncapsulatedFormatIterator) terminate() error {
+func (it *encapsulatedFormatIterator) write(w io.Writer, syntax transferSyntax) error {
+	return writeEncapsulatedFormat(w, syntax.ByteOrder, func() (io.Reader, error) {
+		return it.Next()
+	})
+}
+
+
+func (it *encapsulatedFormatIterator) terminate() error {
 	_, err := it.dr.UInt32(binary.LittleEndian)
 	if err != nil {
 		return fmt.Errorf("reading 32 bit length of sequence delimitation item: %v", err)
 	}
 	it.empty = true
 	return io.EOF
+}
+
+// writeByteFragments writes the concatenated byte fragments in the fragmentProvider to w
+func writeByteFragments(w io.Writer, fragmentProvider func() (io.Reader, error)) error {
+	for fragment, err := fragmentProvider(); err != io.EOF; fragment, err = fragmentProvider() {
+		if err != nil {
+			return fmt.Errorf("retrieving next fragment: %v", err)
+		}
+		if _, err := io.Copy(w, fragment); err != nil {
+			return fmt.Errorf("writing fragment: %v", err)
+		}
+	}
+	return nil
+}
+
+// writeEncapsulatedFormat writes the byte fragments in the BulkDataIterator in the encapsulated
+// format. The first fragment provided by fragmentProvider is assumed to be the basic offset table.
+func writeEncapsulatedFormat(w io.Writer, order binary.ByteOrder, fragmentProvider func() (io.Reader, error)) error {
+	dw := &dcmWriter{w}
+
+	for fragment, err := fragmentProvider(); err != io.EOF; fragment, err = fragmentProvider() {
+		if err != nil {
+			return err
+		}
+		if err := dw.Tag(order, ItemTag); err != nil {
+			return fmt.Errorf("writing fragment tag: %v", err)
+		}
+
+		// TODO provide way of stream writing the fragments without buffering
+		buff, err := ioutil.ReadAll(fragment)
+		if err != nil {
+			return fmt.Errorf("buffering fragment: %v", err)
+		}
+
+		if err := dw.UInt32(order, uint32(len(buff))); err != nil {
+			return fmt.Errorf("writing fragment length: %v", err)
+		}
+		if err := dw.Bytes(buff); err != nil {
+			return fmt.Errorf("writing fragment: %v", err)
+		}
+	}
+
+	if err := dw.Tag(order, SequenceDelimitationItemTag); err != nil {
+		return fmt.Errorf("writing fragment delimitation tag: %v", err)
+	}
+	if err := dw.UInt32(order, 0); err != nil {
+		return fmt.Errorf("writing delimiter length: %v", err)
+	}
+
+	return nil
 }

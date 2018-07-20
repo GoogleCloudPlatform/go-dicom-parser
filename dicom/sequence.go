@@ -18,11 +18,24 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"strings"
 )
 
 // Sequence models a DICOM sequence
 type Sequence struct {
 	Items []*DataSet
+}
+
+func (seq *Sequence) String() string {
+	return seq.string(0)
+}
+
+func (seq *Sequence) string(indentLvl int) string {
+	lines := make([]string, 0)
+	for _, obj := range seq.Items {
+		lines = append(lines, obj.string(indentLvl+1))
+	}
+	return "\n" + strings.Join(lines, "\n")
 }
 
 func (seq *Sequence) append(dataSet *DataSet) {
@@ -41,16 +54,16 @@ type SequenceIterator interface {
 	Close() error
 }
 
-func newSequenceIterator(dr *dcmReader, length uint32, metaData dicomMetaData) (SequenceIterator, error) {
+func newSequenceIterator(dr *dcmReader, length uint32, syntax transferSyntax) (SequenceIterator, error) {
 	if length < UndefinedLength {
-		return &explicitLengthSequenceIterator{dr.Limit(int64(length)), metaData, nil}, nil
+		return &explicitLengthSequenceIterator{dr.Limit(int64(length)), syntax, nil}, nil
 	}
-	return &undefinedLengthSequenceIterator{dr, metaData, nil, false}, nil
+	return &undefinedLengthSequenceIterator{dr, syntax, nil, false}, nil
 }
 
 type explicitLengthSequenceIterator struct {
 	dr             *dcmReader
-	metaData       dicomMetaData
+	syntax         transferSyntax
 	currentSeqItem DataElementIterator
 }
 
@@ -61,7 +74,7 @@ func (it *explicitLengthSequenceIterator) Next() (DataElementIterator, error) {
 		}
 	}
 
-	tag, err := processItemTag(it.dr, it.metaData.syntax.ByteOrder)
+	tag, err := processItemTag(it.dr, it.syntax.ByteOrder)
 	if err == io.EOF {
 		return nil, io.EOF
 	}
@@ -72,11 +85,7 @@ func (it *explicitLengthSequenceIterator) Next() (DataElementIterator, error) {
 		return nil, fmt.Errorf("unexpected sequence delimitation item tag in explicit length sequence")
 	}
 
-	itemReader, err := newSeqItemReader(it.dr, it.metaData)
-	if err != nil {
-		return nil, err
-	}
-	it.currentSeqItem, err = newDataElementIterator(itemReader, it.metaData)
+	it.currentSeqItem, err = newSeqItem(it.dr, it.syntax)
 
 	return it.currentSeqItem, err
 }
@@ -87,7 +96,7 @@ func (it *explicitLengthSequenceIterator) Close() error {
 
 type undefinedLengthSequenceIterator struct {
 	dr             *dcmReader
-	metaData       dicomMetaData
+	syntax         transferSyntax
 	currentSeqItem DataElementIterator
 	empty          bool
 }
@@ -102,7 +111,7 @@ func (it *undefinedLengthSequenceIterator) Next() (DataElementIterator, error) {
 		}
 	}
 
-	tag, err := processItemTag(it.dr, it.metaData.syntax.ByteOrder)
+	tag, err := processItemTag(it.dr, it.syntax.ByteOrder)
 	if err == io.EOF {
 		return nil, fmt.Errorf("unexpected EOF in undefined sequence")
 	}
@@ -113,17 +122,13 @@ func (it *undefinedLengthSequenceIterator) Next() (DataElementIterator, error) {
 		return nil, it.terminate()
 	}
 
-	itemReader, err := newSeqItemReader(it.dr, it.metaData)
-	if err != nil {
-		return nil, err
-	}
-	it.currentSeqItem, err = newDataElementIterator(itemReader, it.metaData)
+	it.currentSeqItem, err = newSeqItem(it.dr, it.syntax)
 
 	return it.currentSeqItem, err
 }
 
 func (it *undefinedLengthSequenceIterator) terminate() error {
-	itemLength, err := it.dr.UInt32(it.metaData.syntax.ByteOrder)
+	itemLength, err := it.dr.UInt32(it.syntax.ByteOrder)
 	if err != nil {
 		return fmt.Errorf("reading 32 bit length of sequence delimitation item: %v", err)
 	}
@@ -158,17 +163,17 @@ func processItemTag(dr *dcmReader, order binary.ByteOrder) (DataElementTag, erro
 	return tag, nil
 }
 
-func newSeqItemReader(dr *dcmReader, metaData dicomMetaData) (*dcmReader, error) {
-	itemLength, err := dr.UInt32(metaData.syntax.ByteOrder)
+func newSeqItem(dr *dcmReader, syntax transferSyntax) (DataElementIterator, error) {
+	itemLength, err := dr.UInt32(syntax.ByteOrder)
 	if err != nil {
 		return nil, fmt.Errorf("reading sequence item length: %v", err)
 	}
 
 	if itemLength >= UndefinedLength {
-		return dr, nil
+		return newDataElementIterator(dr, syntax, itemLength), nil
 	}
 
-	return dr.Limit(int64(itemLength)), nil
+	return newDataElementIterator(dr.Limit(int64(itemLength)), syntax, itemLength), nil
 }
 
 func closeSeq(iter SequenceIterator) error {

@@ -67,7 +67,7 @@ package dicom
 const (
 {{- range .Tags }}
 	{{ printf "// %vTag is the data element tag of %v" .Keyword .Keyword}}
-	{{ printf "%vTag = 0x%08X\n" .Keyword .TagID }}
+	{{ printf "%vTag = DataElementTag(0x%08X)\n" .Keyword .TagID }}
 {{- end }}
 )
 

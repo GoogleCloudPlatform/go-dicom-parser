@@ -22,10 +22,41 @@ import (
 	"io/ioutil"
 	"os"
 	"path"
+	"strings"
 	"testing"
 
 	
 )
+
+func TestSplitUncompressedPixelDataFrames(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *DataElement
+		want *DataElement
+	}{
+		{
+			"a DataElement of zero length does not cause an error",
+			&DataElement{BitsAllocatedTag, USVR, nil, 0},
+			&DataElement{BitsAllocatedTag, USVR, nil, 0},
+		},
+		{
+			"a Data Element with zero length as an empty slice does not cause an error",
+			&DataElement{BitsAllocatedTag, USVR, []uint16{}, 0},
+			&DataElement{BitsAllocatedTag, USVR, []uint16{}, 0},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			opt := SplitUncompressedPixelDataFrames()
+			got, err := opt.transform(tc.in)
+			if err != nil {
+				t.Fatalf("SplitUncompressedPixelDataFrames.transform(_) => %v", err)
+			}
+			compareDataElements(got, tc.want, binary.LittleEndian, t)
+		})
+	}
+}
 
 func TestUTF8Text(t *testing.T) {
 	order := binary.LittleEndian // TODO cleanup dependency on byte order for element comparison
@@ -189,8 +220,8 @@ func TestUTF8Text_encodings(t *testing.T) {
 		},
 		{
 			"GBK",
-			[]byte{0xFE, 0x9F, 0xFE, 0x6E},
-			"䶮⺪",
+			[]byte{0x57, 0x61, 0x6e, 0x67, 0x5e, 0x58, 0x69, 0x61, 0x6f, 0x44, 0x6f, 0x6e, 0x67, 0x3d, 0xcd, 0xf5, 0x5e, 0xd0, 0xa1, 0xb6, 0xab, 0x3d},
+			"Wang^XiaoDong=王^小东=",
 		},
 		{
 			"ISO 2022 IR 6",
@@ -243,14 +274,34 @@ func TestUTF8Text_encodings(t *testing.T) {
 			"\"3DUfwª»Ìİîÿ",
 		},
 		{
-			"ISO 2022 IR 13",
-			[]byte{0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0xAA, 0xBB, 0XCC, 0xDD},
-			"\"3DUfwｪｻﾌﾝ",
+			"ISO 2022 IR 13\\ISO 2022 IR 87",
+			[]byte("\324\317\300\336^\300\333\263=\033$B;3ED\033(J^\033$BB@O:\033(J=\033$B$d$^$@\033(J^\033$B$?$m$&\033(J"),
+			"ﾔﾏﾀﾞ^ﾀﾛｳ=山田^太郎=やまだ^たろう",
 		},
 		{
 			"ISO 2022 IR 166",
 			[]byte{0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0xAA, 0xBB, 0xCC},
 			"\"3DUfwชปฬ",
+		},
+		{
+			"\\ISO 2022 IR 87",
+			[]byte("Yamada^Tarou=\033$B;3ED\033(B^\033$BB@O:\033(B=\033$B$d$^$@\033(B^\033$B$?$m$&\033(B"),
+			"Yamada^Tarou=山田^太郎=やまだ^たろう",
+		},
+		{
+			"\\ISO 2022 IR 149",
+			[]byte("Hong^Gildong=\033$)C\373\363^\033$)C\321\316\324\327=\033$)C\310\253^\033$)C\261\346\265\277"),
+			"Hong^Gildong=洪^吉洞=홍^길동",
+		},
+		{
+			"ISO 2022 IR 6\\ISO 2022 IR 6\\ISO 2022 IR 6\\ISO 2022 IR 6",
+			[]byte("Joe^Smith"),
+			"Joe^Smith",
+		},
+		{
+			"ISO 2022 IR 6",
+			[]byte("Joe^Smith=Joe^Smith=Joe^Smith=Joe^Smith"),
+			"Joe^Smith=Joe^Smith=Joe^Smith=Joe^Smith",
 		},
 	}
 
@@ -260,8 +311,8 @@ func TestUTF8Text_encodings(t *testing.T) {
 			characterSetElement := createCharacterSetElement(tc.characterSetTerm)
 			opt.transform(characterSetElement)
 
-			in := &DataElement{ViewNameTag, SHVR, []string{string(tc.encoded)}, uint32(len(tc.encoded))}
-			want := &DataElement{ViewNameTag, SHVR, []string{tc.utf8}, uint32(len(tc.encoded))}
+			in := &DataElement{ViewNameTag, PNVR, []string{string(tc.encoded)}, uint32(len(tc.encoded))}
+			want := &DataElement{ViewNameTag, PNVR, []string{tc.utf8}, uint32(len(tc.encoded))}
 			got, err := opt.transform(in)
 			if err != nil {
 				t.Fatalf("transform(_) => %v", err)
@@ -348,8 +399,8 @@ func TestDropBasicOffsetTable(t *testing.T) {
 		},
 		{
 			"pixel data of non-encapsulated formats are not modified",
-			createDataElement(PixelDataTag, OBVR, oneShotIteratorFromBytes(sampleBytes), UndefinedLength),
-			createDataElement(PixelDataTag, OBVR, oneShotIteratorFromBytes(sampleBytes), UndefinedLength),
+			createDataElement(PixelDataTag, OBVR, oneShotIteratorFromBytes(sampleBytes), uint32(len(sampleBytes))),
+			createDataElement(PixelDataTag, OBVR, oneShotIteratorFromBytes(sampleBytes), uint32(len(sampleBytes))),
 		},
 	}
 	for _, tc := range tests {
@@ -438,8 +489,7 @@ func ExampleParseOption() {
 }
 
 func createCharacterSetElement(term string) *DataElement {
-	tag := DataElementTag(SpecificCharacterSetTag)
-	return createDataElement(uint32(tag), tag.DictionaryVR(), []string{term}, uint32(len(term)))
+	return createDataElement(SpecificCharacterSetTag, SpecificCharacterSetTag.DictionaryVR(), strings.Split(term, "\\"), uint32(len(term)))
 }
 
 func createBulkDataIterator(b []byte) BulkDataIterator {

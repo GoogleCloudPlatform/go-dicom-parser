@@ -18,8 +18,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-
-	"golang.org/x/text/encoding"
 )
 
 // ParseOption configures the behavior of the Parse function.
@@ -59,7 +57,13 @@ var DropGroupLengths = WithTransform(func(element *DataElement) (*DataElement, e
 // the encapsulated (compressed) format. For more information on the offset table and encapsulated
 // formats please see http://dicom.nema.org/medical/dicom/current/output/html/part05.html#sect_A.4.
 var DropBasicOffsetTable = WithTransform(func(element *DataElement) (*DataElement, error) {
-	if iter, ok := element.ValueField.(*EncapsulatedFormatIterator); ok && element.Tag == PixelDataTag {
+	iter, ok := element.ValueField.(BulkDataIterator)
+	if !ok {
+		return element, nil
+	}
+
+	// When pixel data element has undefined length, it must be the encapsulated (compressed) format.
+	if element.ValueLength == UndefinedLength && element.Tag == PixelDataTag {
 		if _, err := iter.Next(); err != nil {
 			return nil, fmt.Errorf("discarding offset table: %v", err)
 		}
@@ -70,7 +74,7 @@ var DropBasicOffsetTable = WithTransform(func(element *DataElement) (*DataElemen
 // DefaultBulkDataDefinition returns true if and only if the tag corresponds to a data element
 // contains that contains large non-metadata fields
 func DefaultBulkDataDefinition(elem *DataElement) bool {
-	return uint32(elem.Tag) == PixelDataTag
+	return elem.Tag == PixelDataTag
 }
 
 // SplitUncompressedPixelDataFrames returns an option that ensures Data Elements with
@@ -93,6 +97,10 @@ func SplitUncompressedPixelDataFrames() ParseOption {
 	}
 
 	return WithTransform(func(element *DataElement) (*DataElement, error) {
+		if element.ValueLength <= 0 {
+			return element, nil
+		}
+
 		if _, ok := metadata[element.Tag]; ok {
 			v, err := element.IntValue()
 			if err != nil {
@@ -110,8 +118,9 @@ func SplitUncompressedPixelDataFrames() ParseOption {
 }
 
 func toMultiFrame(element *DataElement, metadata map[DataElementTag]int64) (*DataElement, error) {
-	if _, ok := element.ValueField.(*EncapsulatedFormatIterator); ok {
-		// as specified, the SplitUncompressedPixelDataFrames does not do anything to compressed images
+	if element.ValueLength == UndefinedLength {
+		// If the pixel data is in the encapsulated format (indicated by having undefined length), the
+		// option SplitUncompressedPixelDataFrames does not do anything as specified.
 		return element, nil
 	}
 
@@ -197,6 +206,13 @@ func (it *nativeMultiFrame) Close() error {
 	return nil
 }
 
+func (it *nativeMultiFrame) write(w io.Writer, syntax transferSyntax) error {
+	// TODO option should not depend on internal type
+	return writeByteFragments(w, func() (io.Reader, error) {
+		return it.Next()
+	})
+}
+
 func referenceBulkData(element *DataElement, isBulkData func(*DataElement) bool) (*DataElement, error) {
 	if isBulkData(element) {
 		if bulkIter, ok := element.ValueField.(BulkDataIterator); ok {
@@ -213,81 +229,17 @@ func referenceBulkData(element *DataElement, isBulkData func(*DataElement) bool)
 
 // UTF8TextOption returns an option that ensures all textual VRs are decoded into UTF-8.
 func UTF8TextOption() ParseOption {
-	dataSetEncoding := defaultCharacterRepertoire
+	dataSetEncoding := defaultEncodingSystem()
 
 	return WithTransform(func(element *DataElement) (*DataElement, error) {
 		if element.Tag == SpecificCharacterSetTag {
-			coding, err := findEncodingFromElement(element)
+			specificCodingSystem, err := newEncodingSystem(element)
 			if err != nil {
-				return nil, fmt.Errorf("finding encoding from element: %v", err)
+				return nil, fmt.Errorf("setting specific character set: %v", err)
 			}
-			dataSetEncoding = coding
+			dataSetEncoding = specificCodingSystem
 		}
 
-		return toUTF8(element, dataSetEncoding)
+		return dataSetEncoding.decode(element)
 	})
-}
-
-func findEncodingFromElement(element *DataElement) (encoding.Encoding, error) {
-	s, ok := element.ValueField.([]string)
-	if !ok {
-		return nil, fmt.Errorf("unexpected character set type %T (expected string array)", element.ValueField)
-	}
-	if len(s) <= 0 {
-		// As specified above table C.12-4, if the value of (0008,0005) is empty, it is assumed that
-		// value 1 is ISO 2022 IR 6.
-		// http://dicom.nema.org/medical/dicom/current/output/html/part03.html#table_C.12-4
-		return defaultCharacterRepertoire, nil
-	}
-
-	return lookupEncoding(s[0])
-}
-
-func toUTF8(element *DataElement, coding encoding.Encoding) (*DataElement, error) {
-	replaceableCharacterRepertoires := map[*VR]bool{
-		SHVR: true,
-		LOVR: true,
-		STVR: true,
-		LTVR: true,
-		PNVR: true,
-		UCVR: true,
-		UTVR: true,
-	}
-	if !replaceableCharacterRepertoires[element.VR] {
-		// Some VRs cannot have their character repertoires replaced.
-		// If the character repertoire is not replaceable, return the element unmodified. Refer to
-		// part5 of the DICOM standard for more information on character repertoire replacements:
-		// http://dicom.nema.org/medical/dicom/current/output/html/part05.html#chapter_6.1.2.3
-		return element, nil
-	}
-
-	decoder := coding.NewDecoder()
-
-	if s, ok := element.ValueField.([]string); ok {
-		// Small text fields are buffered into memory by default and need to be decoded.
-		for i := range s {
-			decoded, err := decoder.String(s[i])
-			if err != nil {
-				continue // If decoding fails for any reason, just leave the string unmodified.
-			}
-			s[i] = decoded
-		}
-	}
-
-	if bulkData, ok := element.ValueField.(BulkDataIterator); ok {
-		// Large text fields are streamed by default and need to be decoded.
-		bulkDataReader, err := bulkData.Next()
-		if err != nil {
-			return nil, fmt.Errorf("converting text fragment to UTF-8: %v", err)
-		}
-		if _, err := bulkData.Next(); err != io.EOF {
-			return nil, fmt.Errorf("converting multi-fragment text to UTF-8 not supported")
-		}
-
-		utf8Reader := &countReader{decoder.Reader(bulkDataReader), bulkDataReader.Offset}
-
-		element.ValueField = newOneShotIterator(utf8Reader)
-	}
-
-	return element, nil
 }

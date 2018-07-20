@@ -15,376 +15,563 @@
 package dicom
 
 import (
-	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
-	"io/ioutil"
-	"math"
-	"reflect"
+	"os"
 	"testing"
 )
 
-func TestParseDataElement(t *testing.T) {
-	// see http://dicom.nema.org/medical/dicom/current/output/html/part05.html#sect_7.1.2 for byte
-	// structure
-	testCases := []struct {
-		name     string
-		bytes    []byte
-		syntax   transferSyntax
-		expected *DataElement
-		err      error
-	}{
-		{
-			"unsigned long ExplicitVRLittleEndian",
-			[]byte{0x02, 0x00, 0x00, 0x00, 'U', 'L', 0x04, 0x00, 0xCA, 0x00, 0x00, 0x00},
-			explicitVRLittleEndian,
-			&DataElement{
-				0x00020000,
-				ULVR, []uint32{202}, 4},
-			nil,
-		},
-		{
-			"Item Delimination Item",
-			[]byte{0xFE, 0xFF, 0x0D, 0xE0, 0x00, 0x00, 0x00, 0x00},
-			explicitVRLittleEndian,
-			nil,
-			io.EOF,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			element, err := parseDataElement(dcmReaderFromBytes(tc.bytes), metaDataWithSyntax(tc.syntax))
-			if err != tc.err {
-				t.Fatalf("parseDataElement(_, _) => (%v, %v), want (%v, %v)",
-					element, err, tc.expected, tc.err)
-			}
-
-			if tc.expected != nil && !reflect.DeepEqual(*element, *tc.expected) {
-				t.Fatalf("parseDataElement(_, _) => (%v, %v) want (%v, %v)",
-					*element, err, *tc.expected, tc.err)
-			}
-		})
-	}
+type parseInput struct {
+	file   string
+	syntax transferSyntax
+	opts   []ParseOption
 }
 
-func TestGetValueLength(t *testing.T) {
-	// testing format outlined in Table 7.1-1 and 7.1-2 is respected
-	// http://dicom.nema.org/medical/dicom/current/output/html/part05.html#sect_6.2
-	testCases := []struct {
-		name     string
-		bytes    []byte
-		vr       *VR
-		syntax   transferSyntax
-		expected uint32
-	}{
-		{
-			"Sequence explicitVRLittleEndian",
-			[]byte{0x00, 0x00, 0x11, 0x22, 0x33, 0x44},
-			SQVR,
-			explicitVRLittleEndian,
-			0x44332211,
-		},
-		{
-			"Sequence explicitVRBigEndian",
-			[]byte{0x00, 0x00, 0x11, 0x22, 0x33, 0x44},
-			SQVR,
-			explicitVRBigEndian,
-			0x11223344,
-		},
-		{
-			"unsigned short explicitVRLittleEndian",
-			[]byte{0x11, 0x22},
-			USVR,
-			explicitVRLittleEndian,
-			0x2211,
-		},
-		{
-			"unsigned short explicitVRBigEndian",
-			[]byte{0x11, 0x22},
-			USVR,
-			explicitVRBigEndian,
-			0x1122,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			length, err := parseValueLength(
-				dcmReaderFromBytes(tc.bytes), tc.vr, metaDataWithSyntax(tc.syntax))
-
-			if err != nil {
-				t.Fatalf("parseValueLength(_, _, _) => %v", err)
-			}
-			if length != tc.expected {
-				t.Fatalf("got %v, want %v", length, 0x78563412)
-			}
-		})
-	}
-}
-
-func TestParseTag(t *testing.T) {
-	testCases := []struct {
-		name   string
-		in     []byte
-		want   []uint32
-		syntax transferSyntax
-	}{
-		{
-			"read tag in big endian",
-			[]byte{0x00, 0x02, 0x00, 0x10},
-			[]uint32{0x00020010},
-			explicitVRBigEndian,
-		},
-		{
-			"read tag in little endian",
-			[]byte{0x02, 0x00, 0x10, 0x00},
-			[]uint32{0x00020010},
-			explicitVRLittleEndian,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseTag(dcmReaderFromBytes(tc.in), metaDataWithSyntax(tc.syntax), uint32(len(tc.in)))
-			if err != nil {
-				t.Fatalf("parseTag(_, _, _) => %v", err)
-			}
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("got %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestParseText(t *testing.T) {
-	testCases := []struct {
-		name     string
-		bytes    []byte
-		length   uint32
-		padding  byte
-		expected []string
-	}{
-		{
-			"trailing space, vm = 1",
-			[]byte("ABC "),
-			4,
-			' ',
-			[]string{"ABC"},
-		},
-		{
-			"no trailing space, vm = 1",
-			[]byte("ABCD"),
-			4,
-			' ',
-			[]string{"ABCD"},
-		},
-		{
-			"trailing space vm > 1",
-			[]byte("ABC\\DEF "),
-			8,
-			' ',
-			[]string{"ABC", "DEF"},
-		},
-		{
-			"trailing null",
-			[]byte("1.2.840.10008.1.2\x00"),
-			18,
-			0,
-			[]string{"1.2.840.10008.1.2"},
-		},
-		{
-			"multiple trailing spaces are not significant",
-			[]byte("DERIVED \\SECONDARY\\OTHER  "),
-			26,
-			' ',
-			[]string{"DERIVED", "SECONDARY", "OTHER"},
-		},
-		{
-			"test length 0",
-			[]byte{},
-			0,
-			' ',
-			nil,
-		},
-	}
-
-	for _, tc := range testCases {
-		result, err := parseText(dcmReaderFromBytes(tc.bytes), tc.length, tc.padding)
-		if err != nil {
-			t.Fatalf("parseText(_, _, _) => %v", err)
-		}
-		if !reflect.DeepEqual(result, tc.expected) {
-			t.Fatalf("got %v, want %v", result, tc.expected)
-		}
-	}
-}
-
-func TestParseNumberBinary_integers(t *testing.T) {
-	testCases := []struct {
-		name     string
-		bytes    []byte
-		length   uint32
-		vr       *VR
-		endian   binary.ByteOrder
-		expected interface{}
-	}{
-		{
-			"unsigned short, little endian, vm > 1",
-			[]byte{0xAB, 0xCD, 0x12, 0x34},
-			4,
-			USVR,
-			binary.LittleEndian,
-			[]uint16{0xCDAB, 0x3412},
-		},
-		{
-			"unsigned short, big endian, vm > 1",
-			[]byte{0xAB, 0xCD, 0x12, 0x34},
-			4,
-			USVR,
-			binary.BigEndian,
-			[]uint16{0xABCD, 0x1234},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			result, err := parseNumberBinary(dcmReaderFromBytes(tc.bytes),
-				tc.length, tc.vr, metaDataWithSyntax(transferSyntax{false, tc.endian}))
-			if err != nil {
-				t.Fatalf("parseNumberBinary(_, _, _, _) => %v", err)
-			}
-			if !reflect.DeepEqual(result, tc.expected) {
-				t.Fatalf("got %v, want %v", result, tc.expected)
-			}
-		})
-	}
-}
-
-func TestParseNumberBinary_float(t *testing.T) {
-	testCases := []struct {
-		name     string
-		bytes    []byte
-		length   uint32
-		vr       *VR
-		endian   binary.ByteOrder
-		expected []float32
-	}{
-		{
-			"32-bit float, big endian",
-			[]byte{0x3F, 0xC0, 0x00, 0x00},
-			4,
-			FLVR,
-			binary.BigEndian,
-			[]float32{1.5},
-		},
-		{
-			"32-bit float, little endian",
-			[]byte{0x00, 0x00, 0xC0, 0x3F},
-			4,
-			FLVR,
-			binary.LittleEndian,
-			[]float32{1.5},
-		}, {
-			"32-bit float, little endian, vm > 1",
-			[]byte{0x00, 0x00, 0xC0, 0x3F, 0x00, 0x00, 0xC0, 0x3F},
-			8,
-			FLVR,
-			binary.LittleEndian,
-			[]float32{1.5, 1.5},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			result, err := parseNumberBinary(dcmReaderFromBytes(tc.bytes),
-				tc.length, tc.vr, metaDataWithSyntax(transferSyntax{false, tc.endian}))
-			if err != nil {
-				t.Fatalf("parseNumberBinary(_, _, _, _) => %v", err)
-			}
-
-			resultSlice, ok := result.([]float32)
-			if !ok {
-				t.Fatalf("result has wrong type %T expected %T", result, tc.expected)
-			}
-
-			if len(resultSlice) != len(tc.expected) {
-				t.Fatalf("got %v, want %v", tc.expected, resultSlice)
-			}
-
-			if math.Abs(float64(tc.expected[0]-resultSlice[0])) > 0.000000000001 {
-				t.Fatalf("got %v, want %v", result, tc.expected)
-			}
-		})
-	}
-}
-
-func TestParseByteSequence(t *testing.T) {
-	expected := []byte{0x01, 0x02, 0x03, 0x00}
-	result, err := parseBulkData(
-		dcmReaderFromBytes(expected), 0, 4)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	reader, err := result.Next()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	data, err := ioutil.ReadAll(reader)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if bytes.Compare(data, expected) != 0 {
-		t.Fatalf("got %v, want %v", data, expected)
-	}
-}
-
-func TestParseVR_invalid(t *testing.T) {
-	_, err := parseVR(dcmReaderFromBytes([]byte("ZZ")), DataElementTag(0), explicitVRLittleEndian)
-	if err == nil {
-		t.Fatalf("expected error to be returned")
-	}
-}
-
-func TestParseVR(t *testing.T) {
+func TestParse(t *testing.T) {
 	tests := []struct {
-		name   string
-		bytes  []byte
-		tag    DataElementTag
-		syntax transferSyntax
-		want   *VR
+		name string
+		in   parseInput
+		want *DataSet
 	}{
 		{
-			"when in the explicit VR syntax, the data dictionary specified VR is ignored",
-			[]byte("US"),
-			DataElementTag(0),
-			explicitVRLittleEndian,
-			USVR,
+			"Parse Explicit VR Little Endian",
+			parseInput{
+				"ExplicitVRLittleEndian.dcm",
+				explicitVRLittleEndian,
+				nil,
+			},
+			createExpectedDataSet(bufferedPixelData, 198, ExplicitVRLittleEndianUID),
 		},
 		{
-			"when in the implicit VR syntax, the data dictionary VR is returned",
-			[]byte{},
-			OverlayRowsTag,
-			implicitVRLittleEndian,
-			USVR,
+			"Parse Explicit VR Little Endian with undefined lengths",
+			parseInput{
+				"ExplicitVRLittleEndianUndefLen.dcm",
+				explicitVRLittleEndian,
+				nil,
+			},
+			createExpectedDataSet(bufferedPixelData, 198, ExplicitVRLittleEndianUID),
+		},
+		{
+			"Parse Implicit VR Little Endian",
+			parseInput{
+				"ImplicitVRLittleEndian.dcm",
+				implicitVRLittleEndian,
+				nil,
+			},
+			createExpectedDataSet(bufferedPixelData, 196, ImplicitVRLittleEndianUID),
+		},
+		{
+			"Parse DeflatedExplicitVRLittleEndian",
+			parseInput{
+				"DeflatedExplicitVRLittleEndian.dcm",
+				deflatedExplicitVRLittleEndian,
+				nil,
+			},
+			createExpectedDataSet(bufferedPixelData, 200, DeflatedExplicitVRLittleEndianUID),
+		},
+		{
+			"when given an option that transforms BulkDataIterators, that transformation is respected",
+			parseInput{
+				"ExplicitVRLittleEndian.dcm",
+				explicitVRLittleEndian,
+				[]ParseOption{ReferenceBulkData(DefaultBulkDataDefinition)},
+			},
+			createExpectedDataSet(referencedPixelDataElement(428, 4), 198, ExplicitVRLittleEndianUID),
+		},
+		{
+			"when no options transform BulkDataIterators, we still buffer BulkDataIterators",
+			parseInput{
+				"ExplicitVRLittleEndian.dcm",
+				explicitVRLittleEndian,
+				[]ParseOption{excludeTagRange(10, 10)},
+			},
+			createExpectedDataSet(bufferedPixelData, 198, ExplicitVRLittleEndianUID),
 		},
 	}
 
 	for _, tc := range tests {
-		vr, err := parseVR(dcmReaderFromBytes(tc.bytes), tc.tag, tc.syntax)
-		if err != nil {
-			t.Fatalf("parseVR(_) => %v", err)
-		}
-		if vr != tc.want {
-			t.Fatalf("got %v, want %v", vr, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			compareDataSets(parse(tc.in.file, t, tc.in.opts...), tc.want, tc.in.syntax.ByteOrder, t)
+		})
 	}
 }
 
-func metaDataWithSyntax(syntax transferSyntax) dicomMetaData {
-	return dicomMetaData{syntax, defaultCharacterRepertoire}
+func TestParse_dataSetLengths(t *testing.T) {
+	// values validated using dcmtk dump tool
+	tests := []struct {
+		name                      string
+		file                      string
+		wantedSeqItemLength       uint32
+		wantedNestedSeqItemLength uint32
+	}{
+		{
+			"sequence item lengths are respected in the ExplicitVRLittleEndian format",
+			"ExplicitVRLittleEndian.dcm",
+			54,
+			34,
+		},
+		{
+			"sequence item lengths are respected in ImplicitVRLittleEndian format",
+			"ImplicitVRLittleEndian.dcm",
+			50,
+			34,
+		},
+		{
+			"sequence item lengths are respected in ExplicitVRLittleEndian format with undefined lengths",
+			"ExplicitVRLittleEndianUndefLen.dcm",
+			UndefinedLength,
+			UndefinedLength,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ds := parse(tc.file, t)
+
+			gotSeqItem := mustGetFirstSeqItem(ds.Elements[ReferencedStudySequenceTag], t)
+			gotNestedSeqItem := mustGetFirstSeqItem(gotSeqItem.Elements[ReferencedImageSequenceTag], t)
+
+			if gotSeqItem.Length != tc.wantedSeqItemLength {
+				t.Fatalf("wrong seq item length. got %v, want %v", gotSeqItem.Length, tc.wantedSeqItemLength)
+			}
+			if gotNestedSeqItem.Length != tc.wantedNestedSeqItemLength {
+				t.Fatalf("wrong nested seq item length. got %v, want %v", gotNestedSeqItem.Length, tc.wantedNestedSeqItemLength)
+			}
+		})
+	}
+}
+
+func mustGetFirstSeqItem(element *DataElement, t *testing.T) *DataSet {
+	if element == nil {
+		t.Fatalf("unexpected nil *DataElement")
+	}
+	seq, ok := element.ValueField.(*Sequence)
+	if !ok {
+		t.Fatalf("unexpected type %T for element.ValueField (expected *Sequence)", element.ValueField)
+	}
+	if len(seq.Items) == 0 {
+		t.Fatalf("got empty sequence, expeced sequence with at least 1 item")
+	}
+	return seq.Items[0]
+}
+
+func TestParse_filteringOption(t *testing.T) {
+	tests := []struct {
+		name     string
+		in       parseInput
+		filtered DataElementTag
+	}{
+		{
+			"simple exclude filter test",
+			parseInput{
+				"ExplicitVRLittleEndian.dcm",
+				explicitVRLittleEndian,
+				[]ParseOption{excludeTagRange(PixelDataTag, PixelDataTag)},
+			},
+			PixelDataTag,
+		},
+		{
+			"test sequence items can be filtered",
+			parseInput{
+				"ExplicitVRLittleEndian.dcm",
+				explicitVRLittleEndian,
+				[]ParseOption{excludeTagRange(ReferencedImageSequenceTag, ReferencedImageSequenceTag)},
+			},
+			ReferencedImageSequenceTag,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ds := parse(tc.in.file, t, tc.in.opts...)
+			if _, ok := ds.Elements[tc.filtered]; ok {
+				t.Fatalf("filter did not work. Did not expect %v to be in the dataset", tc.filtered)
+			}
+		})
+	}
+}
+
+func TestParse_filteringNestedSeq(t *testing.T) {
+	ds := parse("ExplicitVRLittleEndian.dcm", t, excludeTagRange(ReferencedImageSequenceTag, ReferencedImageSequenceTag))
+	seqElement, ok := ds.Elements[ReferencedStudySequenceTag]
+	if !ok {
+		t.Fatalf("could not find top level sequence")
+	}
+	seq, ok := seqElement.ValueField.(*Sequence)
+	if !ok {
+		t.Fatalf("expected sequence type for top level sequence. Got %T want *Sequence", seqElement.ValueField)
+	}
+	if len(seq.Items) != 1 {
+		t.Fatalf("wrong length for sequence. Got %v, want 1", len(seq.Items))
+	}
+	if _, ok := seq.Items[0].Elements[ReferencedImageSequenceTag]; ok {
+		t.Fatalf("expected nested sequence to be filtered")
+	}
+}
+
+func TestParse_utf8Encoding(t *testing.T) {
+	dataSet := parse("Encoding_ISO_IR_13.dcm", t, UTF8TextOption())
+	element, ok := dataSet.Elements[ViewNameTag]
+	if !ok {
+		t.Fatalf("expected tag %v to be in the returned data set", ViewNameTag)
+	}
+	want := &DataElement{ViewNameTag, SHVR, []string{"ｦﾂﾐﾑ"}, 4}
+	compareDataElements(element, want, binary.LittleEndian, t)
+}
+
+func TestParse_multiFrameSupport(t *testing.T) {
+	frames := [][]byte{
+		[]byte("4\022xV\252\231"),
+		[]byte("\356\335\000\377\021\000"),
+		[]byte("UDwf\231\210"),
+		[]byte("\335\314\377\356\021\000"),
+	}
+	frameRefsUncompressed := []BulkDataReference{
+		{ByteRegion{452, 6}},
+		{ByteRegion{458, 6}},
+		{ByteRegion{464, 6}},
+		{ByteRegion{470, 6}},
+	}
+	frameRefsCompressed := []BulkDataReference{
+		{ByteRegion{422, 0}},
+		{ByteRegion{430, 6}},
+		{ByteRegion{444, 6}},
+		{ByteRegion{458, 6}},
+		{ByteRegion{472, 6}},
+	}
+	referenceOpt := ReferenceBulkData(DefaultBulkDataDefinition)
+
+	tests := []struct {
+		name string
+		file string
+		opts []ParseOption
+		want *DataElement
+	}{
+		{
+			"when the file is in encapsulated format, fragments are untouched",
+			"MultiFrameCompressed.dcm",
+			[]ParseOption{SplitUncompressedPixelDataFrames()},
+			&DataElement{PixelDataTag, OBVR, append([][]byte{{}}, frames...), 24},
+		},
+		{
+			"when the file is encapsulated format and the ReferenceBulkData is used, " +
+				"the fragments are untouched",
+			"MultiFrameCompressed.dcm",
+			[]ParseOption{SplitUncompressedPixelDataFrames(), referenceOpt},
+			&DataElement{PixelDataTag, OBVR, frameRefsCompressed, 24},
+		},
+		{
+			"when the file is native format, fragments are transformed into frames",
+			"MultiFrameUncompressed.dcm",
+			[]ParseOption{SplitUncompressedPixelDataFrames()},
+			&DataElement{PixelDataTag, OWVR, frames, 24},
+		},
+		{
+			"when the file is native format, and given ReferenceBulkData, fragments are " +
+				"transformed into frame refs",
+			"MultiFrameUncompressed.dcm",
+			[]ParseOption{SplitUncompressedPixelDataFrames(), referenceOpt},
+			&DataElement{PixelDataTag, OWVR, frameRefsUncompressed, 24},
+		},
+		{
+			"when given SplitUncompressedPixelDataFrames and UTF8TextOption, frames are not " +
+				"affected by UTF-8",
+			"MultiFrameUncompressed.dcm",
+			[]ParseOption{UTF8TextOption(), SplitUncompressedPixelDataFrames()},
+			&DataElement{PixelDataTag, OWVR, frames, 24},
+		},
+		{
+			"When given UTF8TextOption, SplitUncompressedPixelDataFrames, ReferenceBulkData, " +
+				"UTF-8 streaming does not affect the offsets within references",
+			"MultiFrameUncompressed.dcm",
+			[]ParseOption{UTF8TextOption(), SplitUncompressedPixelDataFrames(), referenceOpt},
+			&DataElement{PixelDataTag, OWVR, frameRefsUncompressed, 24},
+		},
+		{
+			"When given SplitUncompressedPixelDataFrames, UTF8TextOption, ReferenceBulkData, " +
+				"UTF-8 streaming does not affect the offsets within references",
+			"MultiFrameUncompressed.dcm",
+			[]ParseOption{SplitUncompressedPixelDataFrames(), UTF8TextOption(), referenceOpt},
+			&DataElement{PixelDataTag, OWVR, frameRefsUncompressed, 24},
+		},
+		{
+			"DropBasicOffsetTable option can be used with this option",
+			"MultiFrameCompressed.dcm",
+			[]ParseOption{DropBasicOffsetTable, SplitUncompressedPixelDataFrames(), referenceOpt},
+			&DataElement{PixelDataTag, OBVR, frameRefsCompressed[1:], 24},
+		},
+		{
+			"when bits allocated is 0, pixel data is excluded",
+			"MultiFrameUncompressed_BitsAllocatedOne.dcm",
+			[]ParseOption{SplitUncompressedPixelDataFrames()},
+			nil,
+		},
+		{
+			"when pixel meta tags are missing, pixel data is excluded",
+			"MultiFrameUncompressed_missingPixelTags.dcm",
+			[]ParseOption{SplitUncompressedPixelDataFrames()},
+			nil,
+		},
+		{
+			"when pixel meta tags are equal to zero, pixel data is excluded",
+			"MultiFrameUncompressed_zeroPixelTags.dcm",
+			[]ParseOption{SplitUncompressedPixelDataFrames()},
+			nil,
+		},
+		{
+			"when pixel meta tags are null, pixel data is excluded",
+			"MultiFrameUncompressed_nullPixelTags.dcm",
+			[]ParseOption{SplitUncompressedPixelDataFrames()},
+			nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dataSet := parse(tc.file, t, tc.opts...)
+			compareDataElements(dataSet.Elements[PixelDataTag], tc.want, binary.LittleEndian, t)
+		})
+	}
+}
+
+func TestBufferBulkData(t *testing.T) {
+	length := uint32(len(sampleBytes))
+	tests := []struct {
+		name  string
+		in    *DataElement
+		order binary.ByteOrder
+		want  *DataElement
+	}{
+		{
+			"when ValueField has OB VR, empty input produces empty slice",
+			createDataElement(1, OBVR, emptyBulkDataIterator{}, 0),
+			binary.LittleEndian,
+			createDataElement(1, OBVR, [][]byte{}, 0),
+		},
+		{
+			"when ValueField has OB VR",
+			createDataElement(FileMetaInformationVersionTag, OBVR, createBulkDataIterator(sampleBytes), length),
+			binary.LittleEndian,
+			createDataElement(FileMetaInformationVersionTag, OBVR, [][]byte{sampleBytes}, length),
+		},
+		{
+			"when ValueField has OW VR, empty input produces empty slice",
+			createDataElement(1, OBVR, emptyBulkDataIterator{}, 0),
+			binary.LittleEndian,
+			createDataElement(1, OBVR, [][]byte{}, 0),
+		},
+		{
+			"when ValueField has OW VR in little endian",
+			createDataElement(PixelDataTag, OBVR, createBulkDataIterator(sampleBytes), length),
+			binary.LittleEndian,
+			createDataElement(PixelDataTag, OBVR, [][]byte{sampleBytes}, length),
+		},
+		{
+			"when ValueField has OW VR in big endian",
+			createDataElement(PixelDataTag, OWVR, createBulkDataIterator(sampleBytes), length),
+			binary.BigEndian,
+			createDataElement(PixelDataTag, OWVR, [][]byte{sampleBytes}, length),
+		},
+		{
+			"when ValueField has UN VR",
+			createDataElement(1, UNVR, createBulkDataIterator(sampleBytes), length),
+			binary.LittleEndian,
+			createDataElement(1, UNVR, [][]byte{sampleBytes}, length),
+		},
+		{
+			"when ValueField has UN VR empty input produces empty slice",
+			createDataElement(1, UNVR, emptyBulkDataIterator{}, 0),
+			binary.LittleEndian,
+			createDataElement(1, UNVR, [][]byte{}, 0),
+		},
+		{
+			"when ValueField has OF VR, empty input produces empty slice",
+			createDataElement(1, OFVR, emptyBulkDataIterator{}, 0),
+			binary.LittleEndian,
+			createDataElement(1, OFVR, []float32{}, 0),
+		},
+		{
+			"when ValueField has OF VR in big endian",
+			createDataElement(1, OFVR, createBulkDataIterator([]byte{0x3F, 0xC0, 0, 0}), 4),
+			binary.BigEndian,
+			createDataElement(1, OFVR, []float32{1.5}, length),
+		},
+		{
+			"when ValueField has OF VR in big endian with vm > 1",
+			createDataElement(1, OFVR, createBulkDataIterator([]byte{0x3F, 0xC0, 0, 0, 0x3F, 0xC0, 0, 0}), 8),
+			binary.BigEndian,
+			createDataElement(1, OFVR, []float32{1.5, 1.5}, 8),
+		},
+		{
+			"when ValueField has OF VR in little endian",
+			createDataElement(1, OFVR, createBulkDataIterator([]byte{0, 0, 0xC0, 0x3F}), 4),
+			binary.LittleEndian,
+			createDataElement(1, OFVR, []float32{1.5}, length),
+		},
+		{
+			"when ValueField has OD VR, empty input produces empty slice",
+			createDataElement(1, ODVR, emptyBulkDataIterator{}, 0),
+			binary.LittleEndian,
+			createDataElement(1, ODVR, []float64{}, 0),
+		},
+		{
+			"when ValueField has OD VR in big endian",
+			createDataElement(1, ODVR, createBulkDataIterator([]byte{0x3F, 0xF8, 0, 0, 0, 0, 0, 0}), 8),
+			binary.BigEndian,
+			createDataElement(1, ODVR, []float64{1.5}, 8),
+		},
+		{
+			"when ValueField has OD VR in little endian",
+			createDataElement(1, ODVR, createBulkDataIterator([]byte{0, 0, 0, 0, 0, 0, 0xF8, 0x3F}), 8),
+			binary.LittleEndian,
+			createDataElement(1, ODVR, []float64{1.5}, 8),
+		},
+		{
+			"when ValueField has OD VR in little endian with vm > 1",
+			createDataElement(1, ODVR,
+				createBulkDataIterator([]byte{0, 0, 0, 0, 0, 0, 0xF8, 0x3F, 0, 0, 0, 0, 0, 0, 0xF8, 0x3F}), 16),
+			binary.LittleEndian,
+			createDataElement(1, ODVR, []float64{1.5, 1.5}, 16),
+		},
+		{
+			"when Value Field has UC VR, empty input produces empty slice",
+			createDataElement(1, UCVR, emptyBulkDataIterator{}, 0),
+			binary.LittleEndian,
+			createDataElement(1, UCVR, []string{}, 0),
+		},
+		{
+			"when ValueField has UC VR with vm > 1 with trailing spaces",
+			createDataElement(1, UCVR, createBulkDataIterator([]byte("abcd \\gef ")), 10),
+			binary.LittleEndian,
+			createDataElement(1, UCVR, []string{"abcd ", "gef "}, 10),
+		},
+		{
+			"when ValueField has UR VR, empty input produces empty slice",
+			createDataElement(1, URVR, emptyBulkDataIterator{}, 0),
+			binary.LittleEndian,
+			createDataElement(1, URVR, []string{}, 0),
+		},
+		{
+			"when ValueField has UR VR, trailing spaces are removed",
+			createDataElement(1, URVR, createBulkDataIterator([]byte("abcdgef \r\n")), 12),
+			binary.LittleEndian,
+			createDataElement(1, URVR, []string{"abcdgef"}, 12),
+		},
+		{
+			"when ValueField has UT VR, empty input produce empty slice",
+			createDataElement(1, UTVR, emptyBulkDataIterator{}, 0),
+			binary.LittleEndian,
+			createDataElement(1, UTVR, []string{}, 0),
+		},
+		{
+			"when ValueField has UT VR, trailing spaces are ignored and backslashes are allowed",
+			createDataElement(1, UTVR, createBulkDataIterator([]byte("abcd\\\\ \r\r\n")), 12),
+			binary.LittleEndian,
+			createDataElement(1, UTVR, []string{"abcd\\\\"}, 12),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := bufferBulkData(tc.in, tc.order)
+			if err != nil {
+				t.Fatalf("ReferenceBulkData.Apply(_) => (_, %v)", err)
+			}
+			compareDataElements(got, tc.want, tc.order, t)
+		})
+	}
+}
+
+func ExampleParse() {
+	r, err := os.Open("example.dcm")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	dataSet, err := Parse(r)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	for _, element := range dataSet.Elements {
+		if sequence, ok := element.ValueField.(*Sequence); ok {
+			for _, item := range sequence.Items {
+				for _, element := range item.Elements {
+					fmt.Println("sequence item element", element)
+				}
+			}
+		}
+		fmt.Println(element)
+	}
+}
+
+type emptyBulkDataIterator struct{}
+
+func (emptyBulkDataIterator) Next() (*BulkDataReader, error) {
+	return nil, io.EOF
+}
+
+func (emptyBulkDataIterator) ByteOrder() binary.ByteOrder {
+	return binary.LittleEndian
+}
+
+func (emptyBulkDataIterator) Close() error {
+	return nil
+}
+
+func (emptyBulkDataIterator) write(w io.Writer, syntax transferSyntax) error {
+	return nil
+}
+
+func parse(file string, t *testing.T, opts ...ParseOption) *DataSet {
+	f, err := openFile(file)
+	if err != nil {
+		t.Fatalf("opening file: %v", err)
+	}
+	res, err := Parse(f, opts...)
+	if err != nil {
+		t.Fatalf("parsing: %v", err)
+	}
+	return res
+}
+
+func referencedPixelDataElement(offset, length int) *DataElement {
+	refs := []BulkDataReference{{ByteRegion{int64(offset), int64(length)}}}
+	return createDataElement(PixelDataTag, OWVR, refs, uint32(length))
+}
+
+func createExpectedDataSet(pixelElement *DataElement, metaLength uint32, transferSyntaxUID string) *DataSet {
+	expectedDataSet := &DataSet{map[DataElementTag]*DataElement{}, UndefinedLength}
+
+	for _, elem := range expectedElements {
+		expectedDataSet.Elements[elem.Tag] = elem
+	}
+
+	expectedDataSet.Elements[FileMetaInformationGroupLengthTag] = &DataElement{
+		FileMetaInformationGroupLengthTag,
+		ULVR,
+		[]uint32{metaLength},
+		4,
+	}
+	expectedDataSet.Elements[TransferSyntaxUIDTag] = &DataElement{
+		TransferSyntaxUIDTag,
+		UIVR,
+		[]string{transferSyntaxUID},
+		uint32(len(transferSyntaxUID)),
+	}
+	expectedDataSet.Elements[PixelDataTag] = pixelElement
+
+	return expectedDataSet
+}
+
+func excludeTagRange(start, end DataElementTag) ParseOption {
+	return WithTransform(func(element *DataElement) (*DataElement, error) {
+		if start <= element.Tag && element.Tag <= end {
+			// in range. exclude it by returning nil
+			return nil, nil
+		}
+		return element, nil
+	})
 }

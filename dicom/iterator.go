@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"compress/flate"
 )
 
 // DataElementIterator represents an iterator over a DataSet's DataElements
@@ -30,11 +31,16 @@ type DataElementIterator interface {
 	// Close discards all remaining DataElements in the iterator
 	Close() error
 
+	// Length returns the number of bytes of the DataSet defined by elements in the iterator. Can
+	// be equal to UndefinedLength (or equivalently 0xFFFFFFFF) to represent undefined length
+	Length() uint32
+
 	syntax() transferSyntax
 }
 
 // NewDataElementIterator creates a DataElementIterator from a DICOM file. The implementation
-// returned will consume input from the io.Reader given as needed.
+// returned will consume input from the io.Reader given as needed. It is the callers responsibility
+// to ensure that Close is called when done consuming DataElements.
 func NewDataElementIterator(r io.Reader) (DataElementIterator, error) {
 	dr := newDcmReader(r)
 	if err := readDicomSignature(dr); err != nil {
@@ -45,33 +51,60 @@ func NewDataElementIterator(r io.Reader) (DataElementIterator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading meta header: %v", err)
 	}
-
 	syntax, err := findSyntax(metaHeaderBytes)
 	if err != nil {
 		return nil, fmt.Errorf("finding transfer syntax: %v", err)
 	}
 
-	metaIter, err := newDataElementIterator(newDcmReader(bytes.NewBuffer(metaHeaderBytes)), defaultMetaData)
-	if err != nil {
-		return nil, fmt.Errorf("creating meta element iterator: %v", err)
+	metaReader := newDcmReader(bytes.NewBuffer(metaHeaderBytes))
+	metaHeader := newDataElementIterator(metaReader, explicitVRLittleEndian, UndefinedLength)
+
+	if syntax == deflatedExplicitVRLittleEndian {
+		decompressor := flate.NewReader(r)
+		dr := newDcmReader(decompressor)
+
+		iter := &dataElementIterator{
+			dr: dr,
+			transferSyntax: syntax,
+			currentElement: nil,
+			empty: false,
+			metaHeader: metaHeader,
+			length: UndefinedLength,
+		}
+
+		return &deflatedDataElementIterator{DataElementIterator: iter, closer: decompressor}, nil
 	}
 
-	metadata := dicomMetaData{syntax, defaultCharacterRepertoire}
-	return &dataElementIterator{dr, metadata, nil, false, metaIter}, nil
+	return &dataElementIterator{
+		dr: dr,
+		transferSyntax: syntax,
+		currentElement: nil,
+		empty: false,
+		metaHeader: metaHeader,
+		length: UndefinedLength,
+	}, nil
 }
 
 // newDataElementIterator creates a DataElementIterator from a byte stream that excludes header info
 // (preamble and metadata elements)
-func newDataElementIterator(r *dcmReader, metaData dicomMetaData) (DataElementIterator, error) {
-	return &dataElementIterator{r, metaData, nil, false, emptyElementIterator{metaData}}, nil
+func newDataElementIterator(r *dcmReader, syntax transferSyntax, length uint32) DataElementIterator {
+	return &dataElementIterator{
+		r,
+		syntax,
+		nil,
+		false,
+		emptyElementIterator{syntax},
+		length,
+	}
 }
 
 type dataElementIterator struct {
 	dr             *dcmReader
-	metaData       dicomMetaData
+	transferSyntax transferSyntax
 	currentElement *DataElement
 	empty          bool
 	metaHeader     DataElementIterator
+	length         uint32
 }
 
 func (it *dataElementIterator) NextElement() (*DataElement, error) {
@@ -86,7 +119,7 @@ func (it *dataElementIterator) NextElement() (*DataElement, error) {
 }
 
 func (it *dataElementIterator) syntax() transferSyntax {
-	return it.metaData.syntax
+	return it.transferSyntax
 }
 
 func (it *dataElementIterator) nextDataSetElement() (*DataElement, error) {
@@ -97,7 +130,7 @@ func (it *dataElementIterator) nextDataSetElement() (*DataElement, error) {
 		return nil, fmt.Errorf("closing: %v", err)
 	}
 
-	element, err := parseDataElement(it.dr, it.metaData)
+	element, err := readDataElement(it.dr, it.transferSyntax)
 	if err == io.EOF {
 		it.empty = true
 		return nil, io.EOF
@@ -119,6 +152,10 @@ func (it *dataElementIterator) Close() error {
 		}
 	}
 	return nil
+}
+
+func (it *dataElementIterator) Length() uint32 {
+	return it.length
 }
 
 // closeCurrent ensures the iterator is ready to read the next DataElement. If this iterator
@@ -160,61 +197,60 @@ func bufferMetadataHeader(dr *dcmReader) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("buffering bytes of File​Meta​Information​Group​Length: %v", err)
 	}
-	firstElem, err := parseDataElement(
-		newDcmReader(bytes.NewBuffer(firstElemBytes)), defaultMetaData)
+	firstElem, err := readDataElement(newDcmReader(bytes.NewBuffer(firstElemBytes)), explicitVRLittleEndian)
 	if err != nil {
 		return nil, fmt.Errorf("parsing FileMetaInformationGroupLength element: %v", err)
 	}
-	if metaGroupLength, ok := firstElem.ValueField.([]uint32); ok {
-		if len(metaGroupLength) != 1 {
-			return nil, fmt.Errorf("expected 1 value for meta group lengths")
-		}
-		remainderBytes, err := dr.Bytes(int64(metaGroupLength[0]))
-		if err != nil {
-			return nil, fmt.Errorf("buffering the file meta elements: %v", err)
-		}
-
-		return append(firstElemBytes, remainderBytes...), nil
+	metaGroupLength, err := firstElem.IntValue()
+	if err != nil {
+		return nil, fmt.Errorf("FileMetaInformationGroupLength could not be converted to int: %v", err)
 	}
 
-	return nil, fmt.Errorf("wrong type for File​Meta​Information​Group​Length. Got %v, want []uint32", firstElem.ValueField)
+	remainderBytes, err := dr.Bytes(metaGroupLength)
+	if err != nil {
+		return nil, fmt.Errorf("buffering file meta elements: %v", err)
+	}
+
+	return append(firstElemBytes, remainderBytes...), nil
 }
 
 func findSyntax(metaHeaderBytes []byte) (transferSyntax, error) {
 	var syntax transferSyntax
 	metaDCMReader := newDcmReader(bytes.NewBuffer(metaHeaderBytes))
-	metaIter, err := newDataElementIterator(metaDCMReader, defaultMetaData)
-	if err != nil {
-		return syntax, fmt.Errorf("creating iterator for file meta elements: %v", err)
-	}
+	metaIter := newDataElementIterator(metaDCMReader, explicitVRLittleEndian, UndefinedLength)
 
 	for elem, err := metaIter.NextElement(); err != io.EOF; elem, err = metaIter.NextElement() {
 		if err != nil {
 			return syntax, fmt.Errorf("reading meta element: %v", err)
 		}
-		if elem.Tag == TransferSyntaxUIDTag {
-			return findSyntaxFromElement(elem)
+		if elem.Tag != TransferSyntaxUIDTag {
+			continue
 		}
+		syntaxID, err := elem.StringValue()
+		if err != nil {
+			return transferSyntax{}, fmt.Errorf("syntax element could not be converted to string: %v", err)
+		}
+
+		return lookupTransferSyntax(syntaxID), nil
 	}
 
 	return syntax, fmt.Errorf("transfer syntax not found")
 }
 
-func findSyntaxFromElement(element *DataElement) (transferSyntax, error) {
-	var syntax transferSyntax
-	ids, ok := element.ValueField.([]string)
-	if !ok {
-		return syntax, fmt.Errorf("expected type []string for transfer syntax element")
-	}
-	if len(ids) != 1 {
-		return syntax, fmt.Errorf("expected 1 value length for transfer syntax")
-	}
+type deflatedDataElementIterator struct {
+	DataElementIterator
+	closer io.Closer
+}
 
-	return lookupTransferSyntax(ids[0]), nil
+func (it *deflatedDataElementIterator) Close() error {
+	if err := it.DataElementIterator.Close(); err != nil {
+		return err
+	}
+	return it.closer.Close()
 }
 
 type emptyElementIterator struct {
-	metaData dicomMetaData
+	transferSyntax transferSyntax
 }
 
 func (it emptyElementIterator) NextElement() (*DataElement, error) {
@@ -222,9 +258,13 @@ func (it emptyElementIterator) NextElement() (*DataElement, error) {
 }
 
 func (it emptyElementIterator) syntax() transferSyntax {
-	return it.metaData.syntax
+	return it.transferSyntax
 }
 
 func (it emptyElementIterator) Close() error {
 	return nil
+}
+
+func (it emptyElementIterator) Length() uint32 {
+	return 0
 }

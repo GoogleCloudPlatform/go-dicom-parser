@@ -68,7 +68,7 @@ func TestSequenceIterator_Termination(t *testing.T) {
 }
 
 func createSeqIter(b []byte, length uint32, syntax transferSyntax, t *testing.T) SequenceIterator {
-	iter, err := newSequenceIterator(dcmReaderFromBytes(b), length, metaDataWithSyntax(syntax))
+	iter, err := newSequenceIterator(dcmReaderFromBytes(b), length, syntax)
 	if err != nil {
 		t.Fatalf("unexpected error creating SequenceIterator: %v", err)
 	}

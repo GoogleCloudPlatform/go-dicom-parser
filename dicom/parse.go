@@ -12,197 +12,228 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package dicom provides functions and data structures for manipulating the DICOM file format.
+// The package provides two ways of parsing the DICOM format. The simplest of these two ways is the
+// Parse function, which by default returns all the Data Elements of the DICOM object buffered in
+// memory as a DataSet. The more complicated of these two is the DataElementIterator which returns
+// DataElements one at a time and does not buffer.
+//
+// The Parse function and the DataElementIterator represent the ValueField of DataElements
+// differently. The Parse function by default buffers VRs of potentially enormous size
+// (SQ, OX, UN, UT, UR, UC) into memory. In contrast, the DataElementIterator does not buffer these
+// VRs and instead represents them as streaming interfaces. This is particularly useful for heavy
+// image processing.
 package dicom
 
 import (
+	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"strings"
+	"unicode"
 )
 
-func parseDataElement(dr *dcmReader, metaData dicomMetaData) (*DataElement, error) {
-	tag, err := dr.Tag(metaData.syntax.ByteOrder)
-	if err == io.EOF {
-		return nil, io.EOF
-	}
+// Parse parses a DICOM file represented as an io.Reader, returning the DataSet defined by applying
+// options sequentially in the order given to DataElements in the file.
+//
+// By default, BulkDataIterators are transformed into their appropriate buffered types for the VR:
+// [][]byte for OW, OB, UN
+// []uint32 for OL
+// []float64 for OD
+// []float32 for OF
+// []string for UR, UT, UC
+// This behaviour can be overridden by supplying a ParseOption that transforms DataElements with
+// ValueField of type BulkDataIterator to a ValueField other than BulkDataIterator.
+func Parse(r io.Reader, opts ...ParseOption) (*DataSet, error) {
+	iter, err := NewDataElementIterator(r)
 	if err != nil {
-		return nil, fmt.Errorf("getting tag: %v", err)
+		return nil, fmt.Errorf("creating new data element iterator: %v", err)
 	}
+	defer iter.Close()
 
-	if tag == ItemDelimitationItemTag {
-		// handles the case when we are parsing a nested data set within a sequence with undefined
-		// length. This code should never run for the top level data set
-		length, err := dr.UInt32(metaData.syntax.ByteOrder)
-		if err != nil {
-			return nil, fmt.Errorf("reading 32 bit length of item delimitation: %v", err)
-		}
-		if length != 0 {
-			return nil, fmt.Errorf("wrong length for item delimiter. got %v, want %v", length, 0)
-		}
-		return nil, io.EOF
-	}
-
-	vr, err := parseVR(dr, tag, metaData.syntax)
-	if err != nil {
-		return nil, fmt.Errorf("getting vr %v", err)
-	}
-
-	length, err := parseValueLength(dr, vr, metaData)
-	if err != nil {
-		return nil, fmt.Errorf("getting length: %v", err)
-	}
-
-	value, err := parseValue(tag, dr, vr, length, metaData)
-	if err != nil {
-		return nil, fmt.Errorf("parsing value %v", err)
-	}
-
-	return &DataElement{tag, vr, value, length}, nil
+	return CollectDataElements(iter, opts...)
 }
 
-func parseValueLength(dr *dcmReader, vr *VR, metaData dicomMetaData) (uint32, error) {
-	if metaData.syntax.Implicit {
-		return dr.UInt32(metaData.syntax.ByteOrder)
-	}
+// CollectDataElements returns the DataSet defined by the elements in the DataElementIterator.
+// The options will be applied in the order given. The DataElementIterator will be closed.
+func CollectDataElements(iter DataElementIterator, opts ...ParseOption) (*DataSet, error) {
+	ds := &DataSet{map[DataElementTag]*DataElement{}, iter.Length()}
 
-	// For explicit VR, lengths can be stored in a 32 bit field or a 16 bit field
-	// depending on the VR type. The 2 cases are defined at the link:
-	// http://dicom.nema.org/medical/dicom/current/output/html/part05.html#sect_7.1.2
-
-	switch vr {
-	case OBVR, ODVR, OFVR, OLVR, OWVR, SQVR, UCVR, URVR, UTVR, UNVR:
-		// case 1: 32-bit length
-		if _, err := dr.Int16(metaData.syntax.ByteOrder); err != nil {
-			return 0, fmt.Errorf("reading reserved field %v", err)
-		}
-
-		length, err := dr.UInt32(metaData.syntax.ByteOrder)
-		if err != nil {
-			return 0, fmt.Errorf("reading 32 bit length: %v", err)
-		}
-
-		return length, nil
-	}
-
-	// case 2: read 16-bit length
-	length, err := dr.UInt16(metaData.syntax.ByteOrder)
-	if err != nil {
-		return 0, fmt.Errorf("reading 16 bit length: %v", err)
-	}
-
-	return uint32(length), nil
-}
-
-func parseValue(tag DataElementTag, dr *dcmReader, vr *VR, length uint32, metaData dicomMetaData) (interface{}, error) {
-	spacePadding := byte(0x20)
-	nullPadding := byte(0x00)
-
-	switch vr.kind {
-	case textVR:
-		return parseText(dr, length, spacePadding)
-	case numberBinaryVR:
-		return parseNumberBinary(dr, length, vr, metaData)
-	case bulkDataVR:
-		return parseBulkData(dr, tag, length)
-	case uniqueIdentifierVR:
-		return parseText(dr, length, nullPadding)
-	case sequenceVR:
-		return parseSequence(dr, length, metaData)
-	case tagVR:
-		return parseTag(dr, metaData, length)
-	default:
-		return nil, fmt.Errorf("unknown vr type found: %v", vr.kind)
-	}
-}
-
-func parseTag(dr *dcmReader, metaData dicomMetaData, length uint32) ([]uint32, error) {
-	ret := make([]uint32, length/4) // 4 bytes per tag
-
-	for i := range ret {
-		t, err := dr.Tag(metaData.syntax.ByteOrder)
+	for elem, err := iter.NextElement(); err != io.EOF; elem, err = iter.NextElement() {
 		if err != nil {
 			return nil, err
 		}
-		ret[i] = uint32(t)
+		processedElement, err := processElement(elem, iter.syntax().ByteOrder, opts...)
+		if err != nil {
+			return nil, err
+		}
+		if processedElement != nil { // nil check to test if ParseOption wants to filter out element
+			ds.Elements[elem.Tag] = processedElement
+		}
 	}
-	return ret, nil
+	return ds, nil
 }
 
-func parseText(dr *dcmReader, length uint32, paddingByte byte) ([]string, error) {
-	if length <= 0 {
-		return nil, nil
+// CollectSequence returns the Sequence defined by the items in the SequenceIterator.
+// The options will be applied in the order given. The SequenceIterator will be closed.
+func CollectSequence(iter SequenceIterator, opts ...ParseOption) (*Sequence, error) {
+	var seq = &Sequence{[]*DataSet{}}
+	for obj, err := iter.Next(); err != io.EOF; obj, err = iter.Next() {
+		if err != nil {
+			return nil, err
+		}
+		dataSet, err := CollectDataElements(obj, opts...)
+		if err != nil {
+			return nil, err
+		}
+		seq.append(dataSet)
 	}
-
-	valueField, err := dr.String(int64(length))
-	if err != nil {
-		return nil, fmt.Errorf("reading text field value: %v", err)
-	}
-
-	// deal with value multiplicity
-	strs := strings.Split(valueField, "\\")
-	for i, s := range strs {
-		strs[i] = strings.TrimRight(s, string(paddingByte)) // TODO this is wrong for UT
-	}
-	return strs, nil
+	return seq, nil
 }
 
-func parseNumberBinary(dr *dcmReader, length uint32, vr *VR, metaData dicomMetaData) (interface{}, error) {
-	var data interface{}
-
-	switch vr {
-	case SSVR:
-		data = make([]int16, length/2)
-	case USVR:
-		data = make([]uint16, length/2)
-	case SLVR:
-		data = make([]int32, length/4)
-	case ULVR:
-		data = make([]uint32, length/4)
-	case FLVR:
-		data = make([]float32, length/4)
-	case FDVR:
-		data = make([]float64, length/8)
-	default:
-		return nil, fmt.Errorf("unknown vr: %v", vr)
+// CollectFragments returns the sequence of byte slices defined by the sequence of ParseOption
+// in the BulkDataIterator. The BulkDataIterator will be closed.
+func CollectFragments(iter BulkDataIterator) ([][]byte, error) {
+	buff := make([][]byte, 0)
+	for r, err := iter.Next(); err != io.EOF; r, err = iter.Next() {
+		if err != nil {
+			return nil, err
+		}
+		fragment, err := ioutil.ReadAll(r)
+		if err != nil {
+			return nil, fmt.Errorf("reading fragment: %v", fragment)
+		}
+		buff = append(buff, fragment)
 	}
 
-	if err := binary.Read(dr.cr, metaData.syntax.ByteOrder, data); err != nil {
-		return nil, fmt.Errorf("binary.Read(_, _, _) => %v", err)
-	}
-
-	return data, nil
+	return buff, nil
 }
 
-func parseBulkData(dr *dcmReader, tag DataElementTag, length uint32) (BulkDataIterator, error) {
-	if length == UndefinedLength {
-		if tag == PixelDataTag {
-			// Specified in http://dicom.nema.org/medical/dicom/current/output/html/part05.html#sect_A.4
-			// (7FE0,0010) and undefined length means pixel data in encapsulated (compressed) format
-			return newEncapsulatedFormatIterator(dr)
+// CollectFragmentReferences returns the sequence of BulkDataReferences defined by the sequence of
+// ByteFragmentReaders in the BulkDataIterator. The given BulkDataIterator will be closed.
+func CollectFragmentReferences(iter BulkDataIterator) ([]BulkDataReference, error) {
+	refs := make([]BulkDataReference, 0)
+	for r, err := iter.Next(); err != io.EOF; r, err = iter.Next() {
+		if err != nil {
+			return nil, err
+		}
+		fragmentSize, err := io.Copy(ioutil.Discard, r)
+		if err != nil {
+			return nil, err
 		}
 
-		return nil, errors.New("syntax with undefined length in non-pixel data not supported")
+		refs = append(refs, BulkDataReference{ByteRegion{r.Offset, fragmentSize}})
 	}
 
-	// for native (uncompressed) formats, return regular bulk data stream
-	return newOneShotIterator(limitCountReader(dr.cr, int64(length))), nil
+	return refs, nil
 }
 
-func parseSequence(dr *dcmReader, length uint32, metaData dicomMetaData) (SequenceIterator, error) {
-	return newSequenceIterator(dr, length, metaData)
+func processElement(element *DataElement, order binary.ByteOrder, opts ...ParseOption) (*DataElement, error) {
+	if seqIter, ok := element.ValueField.(SequenceIterator); ok {
+		// for sequence elements, apply options in post-order. (i.e process sequence items before
+		// the sequence element)
+		// Processing sequence items first protects options transforming SQ DataElements from the misuse
+		// of the SequenceIterator (e.g. not collecting sequence items correctly)
+		seq, err := CollectSequence(seqIter, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("collecting sequence: %v", err)
+		}
+
+		processedSeq := &DataElement{element.Tag, element.VR, seq, element.ValueLength}
+		return processElement(processedSeq, order, opts...)
+	}
+
+	return applyOptions(element, order, opts...)
 }
 
-func parseVR(dr *dcmReader, tag DataElementTag, syntax transferSyntax) (*VR, error) {
-	if syntax.Implicit {
-		return tag.DictionaryVR(), nil
+func applyOptions(element *DataElement, order binary.ByteOrder, opts ...ParseOption) (*DataElement, error) {
+	var err error
+	for i, opt := range opts {
+		element, err = opt.transform(element)
+		if err != nil {
+			return nil, fmt.Errorf("applying option %v: %v", i, err)
+		}
+		if element == nil { // option wants to filter this element out
+			return nil, nil
+		}
 	}
 
-	vrString, err := dr.String(2)
-	if err != nil {
-		return nil, fmt.Errorf("getting vr %v", vrString)
+	if _, ok := element.ValueField.(BulkDataIterator); ok {
+		// As documented in Parse, when the options given do not collect data from the
+		// BulkDataIterator we must collect the data in the byte stream somehow otherwise the
+		// returned DataSet will not be coherent since it would contain a bunch of empty
+		// BulkDataIterators.
+		element, err = bufferBulkData(element, order)
 	}
 
-	return lookupVRByName(vrString)
+	return element, err
+}
+
+func bufferBulkData(element *DataElement, order binary.ByteOrder) (*DataElement, error) {
+	if fragmentIterator, ok := element.ValueField.(BulkDataIterator); ok {
+		fragments, err := CollectFragments(fragmentIterator)
+		if err != nil {
+			return nil, fmt.Errorf("collecting fragments: %v", err)
+		}
+		var valueField interface{}
+		if element.VR == OWVR || element.VR == OBVR || element.VR == UNVR {
+			valueField = fragments // preserve potentially multi-fragment types
+		} else if len(fragments) == 0 {
+			valueField, err = emptyFragmentForType(element.VR)
+		} else if len(fragments) == 1 {
+			valueField, err = decodeFragment(fragments[0], order, element.VR)
+		} else {
+			return nil, fmt.Errorf("more than 1 fragments found for single fragment type: got %v, want 0 ot 1", len(fragments))
+		}
+
+		return &DataElement{element.Tag, element.VR, valueField, element.ValueLength}, err
+	}
+
+	return nil, fmt.Errorf("wrong type for element.ValueField: got %v, want be BulkDataIterator", element.ValueField)
+}
+
+func emptyFragmentForType(vr *VR) (interface{}, error) {
+	switch vr {
+	case UCVR, URVR, UTVR:
+		return []string{}, nil
+	case OLVR:
+		return []uint32{}, nil
+	case ODVR:
+		return []float64{}, nil
+	case OFVR:
+		return []float32{}, nil
+	}
+	return nil, fmt.Errorf("unexpected VR found for bulk data: %v", vr)
+}
+
+func decodeFragment(buff []byte, order binary.ByteOrder, vr *VR) (interface{}, error) {
+	// Please refer to DICOM PS3.5 Part 5 for details on UC, UR, UT value representations
+	// http://dicom.nema.org/medical/dicom/current/output/html/part05.html#sect_6.1
+
+	var valueField interface{}
+	switch vr {
+	case UCVR:
+		// UC may be padded with trailing spaces and uses the "\" to delimit multiple values
+		return strings.Split(string(buff), "\\"), nil
+	case URVR, UTVR:
+		// UR: Trailing spaces shall be ignored. Backslash is not allowed. Shall be in ISO 2022 IR 6
+		// UT: Trailing spaces may be ignored (and are in this implementation). Backslash not allowed.
+		return []string{strings.TrimRightFunc(string(buff), unicode.IsSpace)}, nil
+	case OLVR:
+		valueField = make([]uint32, len(buff)/4)
+	case ODVR:
+		valueField = make([]float64, len(buff)/8)
+	case OFVR:
+		valueField = make([]float32, len(buff)/4)
+	default:
+		return nil, fmt.Errorf("unexpected vr found: %v", vr)
+	}
+
+	if err := binary.Read(bytes.NewReader(buff), order, valueField); err != nil {
+		return nil, fmt.Errorf("reading to buffer: %v", err)
+	}
+
+	return valueField, nil
 }

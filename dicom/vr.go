@@ -54,17 +54,18 @@ type VR struct {
 	kind vrType
 }
 
-var vrLookupMap = map[string]*VR{}
+// VRLookupMap is a mapping of VR Names to their VR
+var VRLookupMap = map[string]*VR{}
 
 func newVR(text string, vrType vrType) *VR {
 	vr := &VR{text, vrType}
-	vrLookupMap[vr.Name] = vr
+	VRLookupMap[vr.Name] = vr
 
 	return vr
 }
 
 func lookupVRByName(name string) (*VR, error) {
-	r, ok := vrLookupMap[name]
+	r, ok := VRLookupMap[name]
 	if !ok {
 		return nil, fmt.Errorf("unknown vr name: %v", name)
 	}

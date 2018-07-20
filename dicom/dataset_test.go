@@ -1,15 +1,38 @@
+// Copyright 2018 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package dicom
 
 import (
 	"math"
+	"reflect"
 	"strconv"
 	"testing"
 )
 
 type arithmeticSeq struct {
-	start uint32
-	end   uint32
-	inc   uint32
+	start DataElementTag
+	end   DataElementTag
+	inc   DataElementTag
+}
+
+func TestDataElementTag_String(t *testing.T) {
+	got := ItemTag.String()
+	want := "(FFFE,E000)"
+	if got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
 }
 
 func TestDataElementTag_ElementNumber(t *testing.T) {
@@ -112,6 +135,35 @@ func TestDataElementTag_DictionaryVR(t *testing.T) {
 	}
 }
 
+func TestDataElement_String(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *DataElement
+		want string
+	}{
+		{
+			"non-nested data element",
+			&DataElement{FileMetaInformationGroupLengthTag, FileMetaInformationGroupLengthTag.DictionaryVR(), []uint32{198}, 4},
+			"(0002,0000) UL #4 [198]",
+		},
+		{
+			"sequence data element",
+			&DataElement{ReferencedStudySequenceTag, ReferencedStudySequenceTag.DictionaryVR(), &nestedSeq, 34},
+			"(0008,1110) SQ #34 \n" +
+				">(0008,1155) UI #26 [1.2.840.10008.5.1.4.1.1.4]",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.in.String()
+			if got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDataElement_IntValue(t *testing.T) {
 	intMaxStr := strconv.FormatInt(math.MaxInt64, 10)
 	intMinStr := strconv.FormatInt(math.MinInt64, 10)
@@ -204,6 +256,116 @@ func TestDataElement_IntValue_invalidCases(t *testing.T) {
 			elem := &DataElement{ValueField: tc.fieldValue}
 			if _, err := elem.IntValue(); err == nil {
 				t.Fatalf("expected error to be returned")
+			}
+		})
+	}
+}
+
+func TestDataElement_StringValue(t *testing.T) {
+	tests := []struct {
+		name       string
+		fieldValue interface{}
+		want       string
+	}{
+		{
+			"[]string with 1 value",
+			[]string{"A"},
+			"A",
+		},
+		{
+			"[]string with more than 1 value",
+			[]string{"A", "B"},
+			"A",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			elem := &DataElement{ValueField: tc.fieldValue}
+			got, err := elem.StringValue()
+			if err != nil {
+				t.Fatalf("StringValue: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDataElement_StringValue_invalidCases(t *testing.T) {
+	tests := []struct {
+		name       string
+		fieldValue interface{}
+	}{
+		{
+			"empty string slice",
+			[]string{},
+		},
+		{
+			"empty int slice",
+			[]int16{},
+		},
+		{
+			"empty byte slice",
+			[][]byte{},
+		},
+		{
+			"nil value",
+			nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			elem := &DataElement{ValueField: tc.fieldValue}
+			if _, err := elem.StringValue(); err == nil {
+				t.Fatalf("expected error to be returned")
+			}
+		})
+	}
+}
+
+func TestDataSet_SortedTags(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *DataSet
+		want []DataElementTag
+	}{
+		{
+			"when Elements is nil",
+			&DataSet{},
+			[]DataElementTag{},
+		},
+		{
+			"when Elements is empty map",
+			&DataSet{},
+			[]DataElementTag{},
+		},
+		{
+			"when Elements contains multiple elements",
+			&DataSet{map[DataElementTag]*DataElement{
+				PrivateInformationTag:           {},
+				PrivateInformationCreatorUIDTag: {},
+				SourceApplicationEntityTitleTag: {},
+				ImplementationVersionNameTag:    {},
+				ImplementationClassUIDTag:       {},
+			}, UndefinedLength},
+			[]DataElementTag{
+				ImplementationClassUIDTag,
+				ImplementationVersionNameTag,
+				SourceApplicationEntityTitleTag,
+				PrivateInformationCreatorUIDTag,
+				PrivateInformationTag,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.in.SortedTags()
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
 			}
 		})
 	}

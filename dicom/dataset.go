@@ -16,8 +16,13 @@ package dicom
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 )
+
+// DataElementValue represents the value field of a Data Element
+type DataElementValue interface {}
 
 // DataElementTag is a unique identifier for a Data Element composed of an unordered pair
 // of numbers called the group number and the element number as specified in
@@ -26,6 +31,10 @@ import (
 // The least significant 16 bits is the element number. The most significant 16 bits is the group
 // number.
 type DataElementTag uint32
+
+func (t DataElementTag) String() string {
+	return fmt.Sprintf("(%04X,%04X)", t.GroupNumber(), t.ElementNumber())
+}
 
 // GroupNumber returns the group number component of the DataElementTag
 func (t DataElementTag) GroupNumber() uint16 {
@@ -54,6 +63,12 @@ func (t DataElementTag) IsPrivateCreator() bool {
 	return 0x0010 <= t.ElementNumber() && t.ElementNumber() <= 0x00FF
 }
 
+// IsMetaElement returns true if the DataElementTag is a file meta element as defined in
+// http://dicom.nema.org/medical/dicom/current/output/html/part10.html#sect_7.1
+func (t DataElementTag) IsMetaElement() bool {
+	return t.GroupNumber() == 0x0002
+}
+
 // DictionaryVR returns the VR of this DataElementTag as defined in the DICOM data dictionary
 // http://dicom.nema.org/medical/dicom/current/output/html/part06.html. When the dictionary
 // specifies multiple VRs, the last one in VR row is chosen. If the tag cannot be found in the data
@@ -75,16 +90,6 @@ func (t DataElementTag) DictionaryVR() *VR {
 		return UNVR
 	}
 	return vr
-}
-
-// returns true if entry in the data dictionary has a wildcard. e.g CurveDataTag (50xx,3000)
-func (t DataElementTag) wildcardVR() bool {
-	for _, m := range vrWildcardMasks {
-		if _, ok := wildcardTagVRMap[DataElementTag(uint32(t)&^m)]; ok {
-			return true
-		}
-	}
-	return false
 }
 
 func (t DataElementTag) dictionaryVR() (*VR, error) {
@@ -126,12 +131,30 @@ type DataElement struct {
 	// BulkDataIterator
 	// *Sequence
 	// SequenceIterator
-	ValueField interface{}
+	ValueField DataElementValue
 
 	// ValueLength is equal to the length of the ValueField in bytes.
 	// Can be equal to 0xFFFFFFFF to represent an undefined length:
 	// http://dicom.nema.org/medical/dicom/current/output/html/part05.html#sect_7.1.1
 	ValueLength uint32
+}
+
+func (e *DataElement) String() string {
+	return e.string(0)
+}
+
+func (e *DataElement) string(indentLvl int) string {
+	val := ""
+	indent := strings.Repeat(">", indentLvl)
+
+	switch field := e.ValueField.(type) {
+	case *Sequence:
+		val += field.string(indentLvl)
+	default:
+		val += fmt.Sprintf("%v", field)
+	}
+
+	return fmt.Sprintf("%v%v %v #%v %v", indent, e.Tag, e.VR.Name, e.ValueLength, val)
 }
 
 // IntValue returns the first value of ValueField as an int64 if it can safely do so. If it cannot
@@ -174,9 +197,54 @@ func (e *DataElement) IntValue() (int64, error) {
 	return 0, fmt.Errorf("unexpected type %T (expected integer array or integer string)", e.ValueField)
 }
 
+// StringValue value returns the first element of ValueField as a string if ValueField is a string
+// slice with at least 1 value. If this is not the case, an error is returned.
+func (e *DataElement) StringValue() (string, error) {
+	slice, ok := e.ValueField.([]string)
+	if !ok {
+		return "", fmt.Errorf("unexpected type %T (expected string array)", e.ValueField)
+	}
+	if len(slice) > 0 {
+		return slice[0], nil
+	}
+
+	return "", fmt.Errorf("expected non-empty string array")
+}
+
 // DataSet models a DICOM Data Set as defined
 // http://dicom.nema.org/medical/dicom/current/output/html/part05.html#sect_3.10
 type DataSet struct {
 	// Elements is a map of DataElement tags to *DataElement
-	Elements map[uint32]*DataElement
+	Elements map[DataElementTag]*DataElement
+
+	// Length returns the number of bytes used to store the DataSet in the DICOM file. Can be equal
+	// to UndefinedLength (or equivalently 0xFFFFFFFF) to represent undefined length
+	Length uint32
+}
+
+func (d *DataSet) String() string {
+	return d.string(0)
+}
+
+func (d *DataSet) string(indentLvl int) string {
+	lines := make([]string, 0)
+	for _, tag := range d.SortedTags() {
+		elem := d.Elements[tag]
+		lines = append(lines, elem.string(indentLvl))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// SortedTags returns a copy of the DataElementTags in the DataSet in ascending sorted order
+func (d *DataSet) SortedTags() []DataElementTag {
+	tags := make([]DataElementTag, 0)
+	for tag := range d.Elements {
+		tags = append(tags, DataElementTag(tag))
+	}
+
+	sort.Slice(tags, func(i, j int) bool {
+		return tags[i] < tags[j]
+	})
+
+	return tags
 }

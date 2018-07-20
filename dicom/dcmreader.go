@@ -16,6 +16,7 @@ package dicom
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"io/ioutil"
 )
@@ -64,21 +65,10 @@ func (dr *dcmReader) String(n int64) (string, error) {
 // Bytes returns a byte array of size n from the input stream
 func (dr *dcmReader) Bytes(n int64) ([]byte, error) {
 	b := make([]byte, n)
-	_, err := dr.cr.Read(b)
-	return b, err
-}
-
-// Byte returns a byte from the input stream
-func (dr *dcmReader) Byte() (byte, error) {
-	bytes := make([]byte, 1)
-	_, err := dr.cr.Read(bytes)
-	return bytes[0], err
-}
-
-// UInt64 returns a uint64 from the input stream
-func (dr *dcmReader) UInt64(byteOrder binary.ByteOrder) (uint64, error) {
-	var b uint64
-	err := binary.Read(dr.cr, byteOrder, &b)
+	gotN, err := io.ReadAtLeast(dr.cr, b, int(n))
+	if err != nil && gotN != int(n) {
+		return nil, fmt.Errorf("internal error: expected ReadAtLeast to return %d bytes but got %d", n, gotN)
+	}
 	return b, err
 }
 
@@ -89,37 +79,9 @@ func (dr *dcmReader) UInt32(byteOrder binary.ByteOrder) (uint32, error) {
 	return b, err
 }
 
-// Int32 returns a int32 from the input stream
-func (dr *dcmReader) Int32(byteOrder binary.ByteOrder) (int32, error) {
-	var b int32
-	err := binary.Read(dr.cr, byteOrder, &b)
-	return b, err
-}
-
 // UInt16 returns a uint16 from the input stream
 func (dr *dcmReader) UInt16(byteOrder binary.ByteOrder) (uint16, error) {
 	var b uint16
-	err := binary.Read(dr.cr, byteOrder, &b)
-	return b, err
-}
-
-// Int16 returns a int16 from the input stream
-func (dr *dcmReader) Int16(byteOrder binary.ByteOrder) (int16, error) {
-	var b int16
-	err := binary.Read(dr.cr, byteOrder, &b)
-	return b, err
-}
-
-// Float32 returns a float32 from the input stream
-func (dr *dcmReader) Float32(byteOrder binary.ByteOrder) (float32, error) {
-	var b float32
-	err := binary.Read(dr.cr, byteOrder, &b)
-	return b, err
-}
-
-// Float64 returns a float64 from the input stream
-func (dr *dcmReader) Float64(byteOrder binary.ByteOrder) (float64, error) {
-	var b float64
 	err := binary.Read(dr.cr, byteOrder, &b)
 	return b, err
 }

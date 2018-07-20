@@ -24,6 +24,7 @@ import (
 	"path"
 	"reflect"
 	"testing"
+	"testing/iotest"
 
 	
 )
@@ -87,14 +88,35 @@ func TestIterator_NextElement(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
+			defer iter.Close()
 
 			for elem, err := iter.NextElement(); err != io.EOF; elem, err = iter.NextElement() {
 				if err != nil {
 					t.Fatalf("NextElement() => %v", err)
 				}
-				compareDataElements(elem, tc.want.Elements[uint32(elem.Tag)], tc.syntax.ByteOrder, t)
+				compareDataElements(elem, tc.want.Elements[elem.Tag], tc.syntax.ByteOrder, t)
 			}
 		})
+	}
+}
+
+func TestIterator_oneByteReader(t *testing.T) {
+	r, err := openFile("ExplicitVRLittleEndian.dcm")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	iter, err := NewDataElementIterator(iotest.OneByteReader(r))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := createExpectedDataSet(bufferedPixelData, 198, ExplicitVRLittleEndianUID)
+	for elem, err := iter.NextElement(); err != io.EOF; elem, err = iter.NextElement() {
+		if err != nil {
+			t.Fatalf("NextElement() => %v", err)
+		}
+		compareDataElements(elem, want.Elements[elem.Tag], binary.LittleEndian, t)
 	}
 }
 
@@ -114,12 +136,8 @@ func TestIterator_Close(t *testing.T) {
 }
 
 func TestIterator_atEndOfInput(t *testing.T) {
-	iter, err := newDataElementIterator(dcmReaderFromBytes(nil), defaultMetaData)
-	if err != nil {
-		t.Fatalf("unexepcted error: %v", err)
-	}
-	_, err = iter.NextElement()
-	if err != io.EOF {
+	iter := newDataElementIterator(dcmReaderFromBytes(nil), explicitVRLittleEndian, UndefinedLength)
+	if _, err := iter.NextElement(); err != io.EOF {
 		t.Fatalf("expected iterator to return EOF if at end of input: got %v, want %v", err, io.EOF)
 	}
 }
@@ -144,6 +162,7 @@ func ExampleDataElementIterator() {
 		fmt.Println(err)
 		return
 	}
+	defer iter.Close()
 
 	for element, err := iter.NextElement(); err != io.EOF; element, err = iter.NextElement() {
 		if element.Tag != PixelDataTag { // skip elements until pixel data is encountered
@@ -155,6 +174,25 @@ func ExampleDataElementIterator() {
 			}
 		}
 	}
+}
+
+func TestDeflatedIterator_Close(t *testing.T) {
+	closer := &stubCloser{}
+	iter := &deflatedDataElementIterator{&emptyElementIterator{}, closer}
+	iter.Close()
+
+	if !closer.closed {
+		t.Fatalf("expected deflated iterator to close the decompressor")
+	}
+}
+
+type stubCloser struct {
+	closed bool
+}
+
+func (closer *stubCloser) Close() error {
+	closer.closed = true
+	return nil
 }
 
 func compareDataElements(e1 *DataElement, e2 *DataElement, order binary.ByteOrder, t *testing.T) {
@@ -203,23 +241,15 @@ func compareSequences(s1 *Sequence, s2 *Sequence, order binary.ByteOrder, t *tes
 }
 
 func compareDataSets(d1 *DataSet, d2 *DataSet, order binary.ByteOrder, t *testing.T) {
-	k1, k2 := getKeys(d1.Elements), getKeys(d2.Elements)
+	k1, k2 := d1.SortedTags(), d2.SortedTags()
 
 	if !reflect.DeepEqual(k1, k2) {
 		t.Fatalf("expected datasets to have same keys: got %v, want %v", k1, k2)
 	}
 
-	for k := range k1 {
-		compareDataElements(d1.Elements[k], d2.Elements[k], order, t)
+	for _, tag := range k1 {
+		compareDataElements(d1.Elements[tag], d2.Elements[tag], order, t)
 	}
-}
-
-func getKeys(m map[uint32]*DataElement) map[uint32]bool {
-	ret := make(map[uint32]bool)
-	for k := range m {
-		ret[k] = true
-	}
-	return ret
 }
 
 func createIteratorFromFile(file string) (DataElementIterator, error) {
@@ -250,14 +280,14 @@ func dcmReaderFromBytes(data []byte) *dcmReader {
 	return newDcmReader(bytes.NewBuffer(data))
 }
 
-func createDataElement(tag uint32, vr *VR, value interface{}, length uint32) *DataElement {
-	return &DataElement{DataElementTag(tag), vr, value, length}
+func createDataElement(tag DataElementTag, vr *VR, value interface{}, length uint32) *DataElement {
+	return &DataElement{tag, vr, value, length}
 }
 
 func createSingletonSequence(elements ...*DataElement) Sequence {
-	ds := DataSet{map[uint32]*DataElement{}}
+	ds := DataSet{map[DataElementTag]*DataElement{}, UndefinedLength}
 	for _, elem := range elements {
-		ds.Elements[uint32(elem.Tag)] = elem
+		ds.Elements[elem.Tag] = elem
 	}
 	return Sequence{[]*DataSet{&ds}}
 }

@@ -25,8 +25,8 @@ const (
 	ExplicitVRLittleEndianUID = "1.2.840.10008.1.2.1"
 	// ExplicitVRBigEndianUID is the Explicit VR Big Endian UID
 	ExplicitVRBigEndianUID = "1.2.840.10008.1.2.2"
-	// DeflatedExplicitVRLittleEndian is the Deflated Explicit VR Little Endian UID
-	DeflatedExplicitVRLittleEndian = "1.2.840.10008.1.2.1.99"
+	// DeflatedExplicitVRLittleEndianUID is the Deflated Explicit VR Little Endian UID
+	DeflatedExplicitVRLittleEndianUID = "1.2.840.10008.1.2.1.99"
 	// JPEGBaselineUID is the JPEG Baseline (Process 1) transfer syntax UID
 	JPEGBaselineUID = "1.2.840.10008.1.2.4.50"
 )
@@ -41,6 +41,9 @@ func lookupTransferSyntax(uid string) transferSyntax {
 	if uid == ExplicitVRBigEndianUID {
 		return explicitVRBigEndian
 	}
+	if uid == DeflatedExplicitVRLittleEndianUID {
+		return deflatedExplicitVRLittleEndian
+	}
 
 	// any other syntax should be explicit VR little endian according to PS3.5 A.4
 	// http://dicom.nema.org/medical/dicom/current/output/html/part05.html#sect_A.4
@@ -50,10 +53,12 @@ func lookupTransferSyntax(uid string) transferSyntax {
 type transferSyntax struct {
 	Implicit  bool
 	ByteOrder binary.ByteOrder
+	deflated bool
 }
 
 var (
-	explicitVRLittleEndian = transferSyntax{false, binary.LittleEndian}
-	implicitVRLittleEndian = transferSyntax{true, binary.LittleEndian}
-	explicitVRBigEndian    = transferSyntax{false, binary.BigEndian}
+	explicitVRLittleEndian = transferSyntax{false, binary.LittleEndian, false}
+	deflatedExplicitVRLittleEndian = transferSyntax{false, binary.LittleEndian, true}
+	implicitVRLittleEndian = transferSyntax{true, binary.LittleEndian, false}
+	explicitVRBigEndian    = transferSyntax{false, binary.BigEndian, false}
 )

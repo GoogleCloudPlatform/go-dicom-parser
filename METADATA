@@ -1,0 +1,13 @@
+name: "go dicom parser"
+description: ""
+
+third_party {
+  url {
+    type: PIPER
+    value: "http://google3/third_party/godicomparser"
+  }
+}
+
+presubmit: {
+  include_presubmit: "//depot/google3/cloud/healthcare/METADATA.core"
+}
