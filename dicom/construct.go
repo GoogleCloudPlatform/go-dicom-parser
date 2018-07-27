@@ -19,103 +19,27 @@ import (
 	"io"
 )
 
-// Construct writes the given *DataSet as a DICOM file to the given io.Writer. The desired output
-// transfer syntax is specified as a required TransferSyntax DataElement (0002,0010). By default,
-// there is no validation against the DICOM standard of any form.
+// Construct writes the given *DataSet as a DICOM file to the given io.Writer. The desired transfer
+// syntax must be specified as a transfer syntax DataElement (0002,0010) within the *DataSet.
 //
-// If a *DataElement in the *DataSet is missing VR it will be filled in from the
-// DICOM Data Dictionary. The ValueLength of DataElements are ignored and re-calculated.
-func Construct(w io.Writer, dataSet *DataSet) error {
-	dw := &dcmWriter{w}
-
-	if err := writeDicomSignature(dw); err != nil {
-		return err
-	}
-
-	dataSetSyntax, err := findSyntaxFromDataSet(dataSet)
+// *DataElements that contain nil VRs are filled in from the DICOM Data Dictionary. The ValueLength
+// of DataElements are re-calculated to enforce consistency with their ValueFields. The calculation
+// will default to explicit length unless a DataElement specifies undefined length.
+//
+// By default, there is no validation against the DICOM standard of any form.
+func Construct(w io.Writer, dataSet *DataSet, opts ...ConstructOption) error {
+	writer, err := NewDataElementWriter(w, dataSet.MetaElements(), opts...)
 	if err != nil {
-		return fmt.Errorf("getting transfer syntax from data set: %v", err)
+		return fmt.Errorf("creating new DataElementWriter: %v", err)
 	}
 
-	// The FileMetaInformationGroupLength element is a critical component of the Meta Header. It
-	// stores how long the meta header is. Thus, we need to re-calculate it properly.
-	metaGroupLengthElement, err := createMetaGroupLengthElement(dataSet)
-	if err != nil {
-		return fmt.Errorf("creating meta group length element: %v", err)
-	}
-	dataSet.Elements[FileMetaInformationGroupLengthTag] = metaGroupLengthElement
-
-	for _, tag := range dataSet.SortedTags() {
-		element := dataSet.Elements[tag]
-
-		syntax := dataSetSyntax
-		if tag.IsMetaElement() {
-			// File meta elements are always in explicit VR little endian as specified in the standard
-			// http://dicom.nema.org/medical/dicom/current/output/html/part10.html#sect_7.1
-			syntax = explicitVRLittleEndian
-		}
-		if err := writeDataElement(dw, syntax, element); err != nil {
-			return fmt.Errorf("writing data element: %v", err)
-		}
-	}
-
-	return nil
-}
-
-func createMetaGroupLengthElement(dataSet *DataSet) (*DataElement, error) {
-	// Please refer to the DICOM Standard Part 10 for information on the File Meta Information Group
-	// Length. http://dicom.nema.org/medical/dicom/current/output/html/part10.html#sect_7.1
-
-	size := uint32(0)
-	for _, tag := range dataSet.SortedTags() {
-		if tag == FileMetaInformationGroupLengthTag {
-			// The Group Length stores the size of the meta elements following this tag.
+	for _, elem := range dataSet.SortedElements() {
+		if elem.Tag.IsMetaElement() {
 			continue
 		}
-		if !tag.IsMetaElement() {
-			break
+		if err := writer.WriteElement(elem); err != nil {
+			return fmt.Errorf("writing data element %s: %v", elem.Tag, err)
 		}
-		element, err := processedElement(dataSet.Elements[tag])
-		if err != nil {
-			return nil, fmt.Errorf("processing element: %v", err)
-		}
-		switch element.VR {
-		case OBVR, ODVR, OFVR, OLVR, OWVR, SQVR, UCVR, URVR, UTVR, UNVR:
-			size += 4 /*tag*/ + 2 /*vr*/ + 2 /*reserved*/ + 4 /*32-bit length*/ + element.ValueLength
-		default:
-			size += 4 /*tag*/ + 2 /*vr*/ + 2 /*16-bit length*/ + element.ValueLength
-		}
-	}
-
-	return &DataElement{
-		Tag:         FileMetaInformationGroupLengthTag,
-		VR:          FileMetaInformationGroupLengthTag.DictionaryVR(),
-		ValueField:  []uint32{size},
-		ValueLength: 4, // 4bytes = sizeof uint32
-	}, nil
-}
-
-func findSyntaxFromDataSet(dataSet *DataSet) (transferSyntax, error) {
-	syntaxElement, ok := dataSet.Elements[TransferSyntaxUIDTag]
-	if !ok {
-		return transferSyntax{}, fmt.Errorf("transfer syntax element is missing from data set")
-	}
-
-	syntaxUID, err := syntaxElement.StringValue()
-	if err != nil {
-		return transferSyntax{}, fmt.Errorf("transfer syntax element cannot be converted to string: %v", err)
-	}
-
-	return lookupTransferSyntax(syntaxUID), nil
-}
-
-func writeDicomSignature(dw *dcmWriter) error {
-	if err := dw.Bytes(make([]byte, 128)); err != nil {
-		return fmt.Errorf("writing DICOM preamble: %v", err)
-	}
-
-	if err := dw.String("DICM"); err != nil {
-		return fmt.Errorf("writing DICOM signature: %v", err)
 	}
 
 	return nil

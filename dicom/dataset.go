@@ -22,7 +22,7 @@ import (
 )
 
 // DataElementValue represents the value field of a Data Element
-type DataElementValue interface {}
+type DataElementValue interface{}
 
 // DataElementTag is a unique identifier for a Data Element composed of an unordered pair
 // of numbers called the group number and the element number as specified in
@@ -120,7 +120,6 @@ type DataElement struct {
 	// ValueField represents the field within a Data Element that contains its value(s)
 	// Can be any of of the following types:
 	// []string,
-	// [][]byte
 	// []int16,
 	// []uint16,
 	// []int32,
@@ -128,6 +127,7 @@ type DataElement struct {
 	// []float32,
 	// []float64
 	// []BulkDataReference
+	// BulkDataBuffer
 	// BulkDataIterator
 	// *Sequence
 	// SequenceIterator
@@ -222,6 +222,17 @@ type DataSet struct {
 	Length uint32
 }
 
+// NewDataSet is a helper method for creating a DataSet for standard tags.
+// VRs are retrieved from the standard dictionary. No validation is done on the
+// given values.
+func NewDataSet(elems map[DataElementTag]interface{}) *DataSet {
+	ds := &DataSet{Elements: map[DataElementTag]*DataElement{}, Length: UndefinedLength}
+	for tag, val := range elems {
+		ds.Elements[tag] = &DataElement{Tag: tag, VR: tag.DictionaryVR(), ValueField: val}
+	}
+	return ds
+}
+
 func (d *DataSet) String() string {
 	return d.string(0)
 }
@@ -233,6 +244,16 @@ func (d *DataSet) string(indentLvl int) string {
 		lines = append(lines, elem.string(indentLvl))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// Merge merges two dataset's together. The dataset passed in has precedence
+// for conflicting elements. Length will be set to Undefined.
+func (d *DataSet) Merge(other *DataSet) *DataSet {
+	for tag, elem := range other.Elements {
+		d.Elements[tag] = elem
+	}
+	d.Length = UndefinedLength
+	return d
 }
 
 // SortedTags returns a copy of the DataElementTags in the DataSet in ascending sorted order
@@ -247,4 +268,49 @@ func (d *DataSet) SortedTags() []DataElementTag {
 	})
 
 	return tags
+}
+
+// SortedElements returns a reference to the DataElements in the DataSet sorted by DataElementTag in
+// ascending order
+func (d *DataSet) SortedElements() []*DataElement {
+	sortedTags := d.SortedTags()
+	ret := make([]*DataElement, len(sortedTags))
+	for i, tag := range sortedTags {
+		ret[i] = d.Elements[tag]
+	}
+	return ret
+}
+
+// MetaElements returns a DataSet containing only the File Meta Elements (0002,xxxx) in the DataSet
+func (d *DataSet) MetaElements() *DataSet {
+	ret := &DataSet{Elements: map[DataElementTag]*DataElement{}}
+	for _, elem := range d.Elements {
+		if elem.Tag.IsMetaElement() {
+			ret.Elements[elem.Tag] = elem
+		}
+	}
+	return ret
+}
+
+func (d *DataSet) transferSyntax() (transferSyntax, error) {
+	syntaxElement, ok := d.Elements[TransferSyntaxUIDTag]
+	if !ok {
+		return nil, fmt.Errorf("transfer syntax element is missing from data set")
+	}
+
+	syntaxUID, err := syntaxElement.StringValue()
+	if err != nil {
+		return nil, fmt.Errorf("transfer syntax element cannot be converted to string: %v", err)
+	}
+
+	return lookupTransferSyntax(syntaxUID), nil
+}
+
+func (d *DataSet) isMetaHeader() bool {
+	for _, elem := range d.Elements {
+		if !elem.Tag.IsMetaElement() {
+			return false
+		}
+	}
+	return true
 }

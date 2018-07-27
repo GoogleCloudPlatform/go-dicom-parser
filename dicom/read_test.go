@@ -110,9 +110,7 @@ func TestGetValueLength(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			length, err := readValueLength(
-				dcmReaderFromBytes(tc.bytes), tc.vr, tc.syntax)
-
+			length, err := tc.syntax.readValueLength(dcmReaderFromBytes(tc.bytes), tc.vr)
 			if err != nil {
 				t.Fatalf("readValueLength(_, _, _) => %v", err)
 			}
@@ -185,6 +183,12 @@ func TestReadText(t *testing.T) {
 		{
 			"trailing nulls are used for UI VRs",
 			[]byte("1.2.840.10008.1.2\x00"),
+			UIVR,
+			[]string{"1.2.840.10008.1.2"},
+		},
+		{
+			"spaces are removed from UI VRs",
+			[]byte("  1.2.840.10008.1.2\x00    "),
 			UIVR,
 			[]string{"1.2.840.10008.1.2"},
 		},
@@ -414,47 +418,5 @@ func TestReadByteSequence(t *testing.T) {
 
 	if bytes.Compare(data, expected) != 0 {
 		t.Fatalf("got %v, want %v", data, expected)
-	}
-}
-
-func TestReadVR_invalid(t *testing.T) {
-	_, err := readVR(dcmReaderFromBytes([]byte("ZZ")), DataElementTag(0), explicitVRLittleEndian)
-	if err == nil {
-		t.Fatalf("expected error to be returned")
-	}
-}
-
-func TestReadVR(t *testing.T) {
-	tests := []struct {
-		name   string
-		bytes  []byte
-		tag    DataElementTag
-		syntax transferSyntax
-		want   *VR
-	}{
-		{
-			"when in the explicit VR syntax, the data dictionary specified VR is ignored",
-			[]byte("US"),
-			DataElementTag(0),
-			explicitVRLittleEndian,
-			USVR,
-		},
-		{
-			"when in the implicit VR syntax, the data dictionary VR is returned",
-			[]byte{},
-			OverlayRowsTag,
-			implicitVRLittleEndian,
-			USVR,
-		},
-	}
-
-	for _, tc := range tests {
-		vr, err := readVR(dcmReaderFromBytes(tc.bytes), tc.tag, tc.syntax)
-		if err != nil {
-			t.Fatalf("readVR(_) => %v", err)
-		}
-		if vr != tc.want {
-			t.Fatalf("got %v, want %v", vr, tc.want)
-		}
 	}
 }

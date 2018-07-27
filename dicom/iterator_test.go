@@ -15,38 +15,13 @@
 package dicom
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
-	"path"
-	"reflect"
 	"testing"
 	"testing/iotest"
-
-	
-)
-
-var (
-	nestedDataSetElement = createDataElement(0x00081155, UIVR,
-		[]string{"1.2.840.10008.5.1.4.1.1.4"}, 26)
-	nestedSeq         = createSingletonSequence(nestedDataSetElement)
-	seq               = createSingletonSequence(createDataElement(ReferencedImageSequenceTag, SQVR, &nestedSeq, 42))
-	bufferedPixelData = createDataElement(PixelDataTag, OWVR, [][]byte{{0x11, 0x11, 0x22, 0x22}}, 4)
-	expectedElements  = []*DataElement{
-		createDataElement(0x00020000, ULVR, []uint32{198}, 4),
-		createDataElement(0x00020001, OBVR, [][]byte{{0, 1}}, 2),
-		createDataElement(0x00020002, UIVR, []string{"1.2.840.10008.5.1.4.1.1.4"}, 26),
-		createDataElement(0x00020003, UIVR,
-			[]string{"1.2.840.113619.2.176.3596.3364818.7271.1259708501.876"}, 54),
-		createDataElement(0x00020010, UIVR, []string{"1.2.840.10008.1.2.1"}, 20),
-		createDataElement(0x00020012, UIVR, []string{"1.2.276.0.7230010.3.0.3.5.4"}, 28),
-		createDataElement(0x00020013, SHVR, []string{"OFFIS_DCMTK_354"}, 16),
-		createDataElement(0x00081110, SQVR, &seq, 62),
-		bufferedPixelData,
-	}
 )
 
 func TestIterator_NextElement(t *testing.T) {
@@ -90,11 +65,11 @@ func TestIterator_NextElement(t *testing.T) {
 			}
 			defer iter.Close()
 
-			for elem, err := iter.NextElement(); err != io.EOF; elem, err = iter.NextElement() {
+			for elem, err := iter.Next(); err != io.EOF; elem, err = iter.Next() {
 				if err != nil {
-					t.Fatalf("NextElement() => %v", err)
+					t.Fatalf("Next() => %v", err)
 				}
-				compareDataElements(elem, tc.want.Elements[elem.Tag], tc.syntax.ByteOrder, t)
+				compareDataElements(elem, tc.want.Elements[elem.Tag], tc.syntax.byteOrder(), t)
 			}
 		})
 	}
@@ -112,9 +87,9 @@ func TestIterator_oneByteReader(t *testing.T) {
 	}
 
 	want := createExpectedDataSet(bufferedPixelData, 198, ExplicitVRLittleEndianUID)
-	for elem, err := iter.NextElement(); err != io.EOF; elem, err = iter.NextElement() {
+	for elem, err := iter.Next(); err != io.EOF; elem, err = iter.Next() {
 		if err != nil {
-			t.Fatalf("NextElement() => %v", err)
+			t.Fatalf("Next() => %v", err)
 		}
 		compareDataElements(elem, want.Elements[elem.Tag], binary.LittleEndian, t)
 	}
@@ -130,21 +105,21 @@ func TestIterator_Close(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if _, err := iter.NextElement(); err != io.EOF {
+	if _, err := iter.Next(); err != io.EOF {
 		t.Fatalf("got %v, want %v", err, io.EOF)
 	}
 }
 
 func TestIterator_atEndOfInput(t *testing.T) {
 	iter := newDataElementIterator(dcmReaderFromBytes(nil), explicitVRLittleEndian, UndefinedLength)
-	if _, err := iter.NextElement(); err != io.EOF {
+	if _, err := iter.Next(); err != io.EOF {
 		t.Fatalf("expected iterator to return EOF if at end of input: got %v, want %v", err, io.EOF)
 	}
 }
 
 func TestEmptyIterator(t *testing.T) {
 	iter := &dataElementIterator{empty: true, metaHeader: emptyElementIterator{}}
-	_, err := iter.NextElement()
+	_, err := iter.Next()
 	if err != io.EOF {
 		t.Fatalf("expected empty iterator to return io.EOF: got %v, want %v", err, io.EOF)
 	}
@@ -164,7 +139,7 @@ func ExampleDataElementIterator() {
 	}
 	defer iter.Close()
 
-	for element, err := iter.NextElement(); err != io.EOF; element, err = iter.NextElement() {
+	for element, err := iter.Next(); err != io.EOF; element, err = iter.Next() {
 		if element.Tag != PixelDataTag { // skip elements until pixel data is encountered
 			continue
 		}
@@ -193,101 +168,4 @@ type stubCloser struct {
 func (closer *stubCloser) Close() error {
 	closer.closed = true
 	return nil
-}
-
-func compareDataElements(e1 *DataElement, e2 *DataElement, order binary.ByteOrder, t *testing.T) {
-	if e1 == nil || e2 == nil {
-		if e1 != e2 {
-			t.Fatalf("expected both elements to be nil: got %v, want %v", e1, e2)
-		}
-		return
-	}
-	if e1.VR != e2.VR {
-		t.Fatalf("expected VRs to be equal: got %v, want %v", e1.VR, e2.VR)
-	}
-	if e1.Tag != e2.Tag {
-		t.Fatalf("expected tags to be equal: got %v, want %v", e1.Tag, e2.Tag)
-	}
-
-	var err error
-	e1, err = processElement(e1, order)
-	if err != nil {
-		t.Fatalf("unexpected error unstreaming data element: %v", err)
-	}
-	e2, err = processElement(e2, order)
-	if err != nil {
-		t.Fatalf("unexpected error unstreaming data element: %v", err)
-	}
-
-	if e1.VR != SQVR {
-		if !reflect.DeepEqual(e1.ValueField, e2.ValueField) {
-			t.Fatalf("expected ValueFields to be equal: got %v, want %v",
-				e1.ValueField, e2.ValueField)
-		}
-	} else {
-		compareSequences(e1.ValueField.(*Sequence), e2.ValueField.(*Sequence), order, t)
-	}
-}
-
-func compareSequences(s1 *Sequence, s2 *Sequence, order binary.ByteOrder, t *testing.T) {
-	if len(s1.Items) != len(s2.Items) {
-		t.Fatalf("expected sequences to have same length: got %v, want %v",
-			len(s1.Items), len(s2.Items))
-	}
-
-	for i := range s1.Items {
-		compareDataSets(s1.Items[i], s2.Items[i], order, t)
-	}
-}
-
-func compareDataSets(d1 *DataSet, d2 *DataSet, order binary.ByteOrder, t *testing.T) {
-	k1, k2 := d1.SortedTags(), d2.SortedTags()
-
-	if !reflect.DeepEqual(k1, k2) {
-		t.Fatalf("expected datasets to have same keys: got %v, want %v", k1, k2)
-	}
-
-	for _, tag := range k1 {
-		compareDataElements(d1.Elements[tag], d2.Elements[tag], order, t)
-	}
-}
-
-func createIteratorFromFile(file string) (DataElementIterator, error) {
-	r, err := openFile(file)
-	if err != nil {
-		return nil, err
-	}
-
-	return NewDataElementIterator(r)
-}
-
-func openFile(name string) (io.Reader, error) {
-	p := path.Join("../", "testdata/"+name)
-
-	return os.Open(p)
-}
-
-var sampleBytes = []byte{1, 2, 3, 4}
-
-func countReaderFromBytes(data []byte) *countReader {
-	return &countReader{
-		bytes.NewBuffer(data),
-		0,
-	}
-}
-
-func dcmReaderFromBytes(data []byte) *dcmReader {
-	return newDcmReader(bytes.NewBuffer(data))
-}
-
-func createDataElement(tag DataElementTag, vr *VR, value interface{}, length uint32) *DataElement {
-	return &DataElement{tag, vr, value, length}
-}
-
-func createSingletonSequence(elements ...*DataElement) Sequence {
-	ds := DataSet{map[DataElementTag]*DataElement{}, UndefinedLength}
-	for _, elem := range elements {
-		ds.Elements[elem.Tag] = elem
-	}
-	return Sequence{[]*DataSet{&ds}}
 }

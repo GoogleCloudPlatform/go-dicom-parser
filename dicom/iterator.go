@@ -16,17 +16,17 @@ package dicom
 
 import (
 	"bytes"
+	"compress/flate"
 	"fmt"
 	"io"
-	"compress/flate"
 )
 
 // DataElementIterator represents an iterator over a DataSet's DataElements
 type DataElementIterator interface {
-	// NextElement returns the next DataElement in the DataSet. If there is no next DataElement, the
+	// Next returns the next DataElement in the DataSet. If there is no next DataElement, the
 	// error io.EOF is returned. In Addition, if any previously returned DataElements contained
 	// iterable objects like SequenceIterator, BulkDataIterator, these iterators are emptied.
-	NextElement() (*DataElement, error)
+	Next() (*DataElement, error)
 
 	// Close discards all remaining DataElements in the iterator
 	Close() error
@@ -64,24 +64,24 @@ func NewDataElementIterator(r io.Reader) (DataElementIterator, error) {
 		dr := newDcmReader(decompressor)
 
 		iter := &dataElementIterator{
-			dr: dr,
+			dr:             dr,
 			transferSyntax: syntax,
 			currentElement: nil,
-			empty: false,
-			metaHeader: metaHeader,
-			length: UndefinedLength,
+			empty:          false,
+			metaHeader:     metaHeader,
+			length:         UndefinedLength,
 		}
 
 		return &deflatedDataElementIterator{DataElementIterator: iter, closer: decompressor}, nil
 	}
 
 	return &dataElementIterator{
-		dr: dr,
+		dr:             dr,
 		transferSyntax: syntax,
 		currentElement: nil,
-		empty: false,
-		metaHeader: metaHeader,
-		length: UndefinedLength,
+		empty:          false,
+		metaHeader:     metaHeader,
+		length:         UndefinedLength,
 	}, nil
 }
 
@@ -107,8 +107,8 @@ type dataElementIterator struct {
 	length         uint32
 }
 
-func (it *dataElementIterator) NextElement() (*DataElement, error) {
-	metaElem, err := it.metaHeader.NextElement()
+func (it *dataElementIterator) Next() (*DataElement, error) {
+	metaElem, err := it.metaHeader.Next()
 	if err == io.EOF {
 		return it.nextDataSetElement()
 	}
@@ -146,7 +146,7 @@ func (it *dataElementIterator) nextDataSetElement() (*DataElement, error) {
 
 func (it *dataElementIterator) Close() error {
 	// empty the iterator
-	for _, err := it.NextElement(); err != io.EOF; _, err = it.NextElement() {
+	for _, err := it.Next(); err != io.EOF; _, err = it.Next() {
 		if err != nil {
 			return fmt.Errorf("unexpected error closing iterator: %v", err)
 		}
@@ -219,7 +219,7 @@ func findSyntax(metaHeaderBytes []byte) (transferSyntax, error) {
 	metaDCMReader := newDcmReader(bytes.NewBuffer(metaHeaderBytes))
 	metaIter := newDataElementIterator(metaDCMReader, explicitVRLittleEndian, UndefinedLength)
 
-	for elem, err := metaIter.NextElement(); err != io.EOF; elem, err = metaIter.NextElement() {
+	for elem, err := metaIter.Next(); err != io.EOF; elem, err = metaIter.Next() {
 		if err != nil {
 			return syntax, fmt.Errorf("reading meta element: %v", err)
 		}
@@ -228,7 +228,7 @@ func findSyntax(metaHeaderBytes []byte) (transferSyntax, error) {
 		}
 		syntaxID, err := elem.StringValue()
 		if err != nil {
-			return transferSyntax{}, fmt.Errorf("syntax element could not be converted to string: %v", err)
+			return nil, fmt.Errorf("syntax element could not be converted to string: %v", err)
 		}
 
 		return lookupTransferSyntax(syntaxID), nil
@@ -253,7 +253,7 @@ type emptyElementIterator struct {
 	transferSyntax transferSyntax
 }
 
-func (it emptyElementIterator) NextElement() (*DataElement, error) {
+func (it emptyElementIterator) Next() (*DataElement, error) {
 	return nil, io.EOF
 }
 

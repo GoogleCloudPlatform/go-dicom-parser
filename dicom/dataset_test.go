@@ -150,7 +150,8 @@ func TestDataElement_String(t *testing.T) {
 			"sequence data element",
 			&DataElement{ReferencedStudySequenceTag, ReferencedStudySequenceTag.DictionaryVR(), &nestedSeq, 34},
 			"(0008,1110) SQ #34 \n" +
-				">(0008,1155) UI #26 [1.2.840.10008.5.1.4.1.1.4]",
+				">(0008,1155) UI #26 [1.2.840.10008.5.1.4.1.1.4]\n" +
+				">(0018,2042) UI #26 [1.2.840.10008.5.1.4.1.1.5]",
 		},
 	}
 
@@ -308,7 +309,7 @@ func TestDataElement_StringValue_invalidCases(t *testing.T) {
 		},
 		{
 			"empty byte slice",
-			[][]byte{},
+			NewBulkDataBuffer([]byte{}),
 		},
 		{
 			"nil value",
@@ -326,6 +327,44 @@ func TestDataElement_StringValue_invalidCases(t *testing.T) {
 	}
 }
 
+func TestDataSet_NewDataSet(t *testing.T) {
+	expected := &DataSet{
+		Elements: map[DataElementTag]*DataElement{
+			TransferSyntaxUIDTag: {Tag: TransferSyntaxUIDTag, VR: UIVR, ValueField: []string{ExplicitVRLittleEndianUID}},
+		},
+		Length: UndefinedLength,
+	}
+
+	actual := NewDataSet(map[DataElementTag]interface{}{
+		TransferSyntaxUIDTag: []string{ExplicitVRLittleEndianUID},
+	})
+
+	if !reflect.DeepEqual(expected, actual) {
+		t.Fatalf("expected %s, actual: %s", expected, actual)
+	}
+}
+
+func TestDataSet_Merge(t *testing.T) {
+	expected := &DataSet{
+		Elements: map[DataElementTag]*DataElement{
+			TransferSyntaxUIDTag:    {Tag: TransferSyntaxUIDTag, VR: UIVR, ValueField: []string{ImplicitVRLittleEndianUID}},
+			SpecificCharacterSetTag: {Tag: SpecificCharacterSetTag, VR: CSVR, ValueField: []string{"ISO_IR 192"}},
+		},
+		Length: UndefinedLength,
+	}
+
+	actual := NewDataSet(map[DataElementTag]interface{}{
+		TransferSyntaxUIDTag: []string{ExplicitVRLittleEndianUID},
+	}).Merge(NewDataSet(map[DataElementTag]interface{}{
+		TransferSyntaxUIDTag:    []string{ImplicitVRLittleEndianUID},
+		SpecificCharacterSetTag: []string{"ISO_IR 192"},
+	}))
+
+	if !reflect.DeepEqual(expected, actual) {
+		t.Fatalf("expected %s, actual: %s", expected, actual)
+	}
+}
+
 func TestDataSet_SortedTags(t *testing.T) {
 	tests := []struct {
 		name string
@@ -339,7 +378,7 @@ func TestDataSet_SortedTags(t *testing.T) {
 		},
 		{
 			"when Elements is empty map",
-			&DataSet{},
+			&DataSet{Elements: map[DataElementTag]*DataElement{}},
 			[]DataElementTag{},
 		},
 		{
@@ -364,6 +403,91 @@ func TestDataSet_SortedTags(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got := tc.in.SortedTags()
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDataSet_SortedElements(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *DataSet
+		want []*DataElement
+	}{
+		{
+			"when Elements is nil",
+			&DataSet{},
+			[]*DataElement{},
+		},
+		{
+			"when Elements is empty map",
+			&DataSet{Elements: map[DataElementTag]*DataElement{}},
+			[]*DataElement{},
+		},
+		{
+			"when Elements contains multiple elements",
+			&DataSet{map[DataElementTag]*DataElement{
+				PrivateInformationTag:           {Tag: PrivateInformationTag},
+				PrivateInformationCreatorUIDTag: {Tag: PrivateInformationCreatorUIDTag},
+				SourceApplicationEntityTitleTag: {Tag: SourceApplicationEntityTitleTag},
+				ImplementationVersionNameTag:    {Tag: ImplementationVersionNameTag},
+				ImplementationClassUIDTag:       {Tag: ImplementationClassUIDTag},
+			}, UndefinedLength},
+			[]*DataElement{
+				{Tag: ImplementationClassUIDTag},
+				{Tag: ImplementationVersionNameTag},
+				{Tag: SourceApplicationEntityTitleTag},
+				{Tag: PrivateInformationCreatorUIDTag},
+				{Tag: PrivateInformationTag},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.in.SortedElements()
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("")
+			}
+		})
+	}
+}
+
+func TestDataSet_MetaElements(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *DataSet
+		want *DataSet
+	}{
+		{
+			"when Elements is nil",
+			&DataSet{},
+			&DataSet{Elements: map[DataElementTag]*DataElement{}},
+		},
+		{
+			"when Elements is an empty map",
+			&DataSet{Elements: map[DataElementTag]*DataElement{}},
+			&DataSet{Elements: map[DataElementTag]*DataElement{}},
+		},
+		{
+			"when elements is non empty",
+			&DataSet{Elements: map[DataElementTag]*DataElement{
+				FileMetaInformationGroupLengthTag: {Tag: FileMetaInformationGroupLengthTag},
+				TransferSyntaxUIDTag:              {Tag: TransferSyntaxUIDTag},
+				PixelDataTag:                      {Tag: PixelDataTag},
+			}},
+			&DataSet{Elements: map[DataElementTag]*DataElement{
+				FileMetaInformationGroupLengthTag: {Tag: FileMetaInformationGroupLengthTag},
+				TransferSyntaxUIDTag:              {Tag: TransferSyntaxUIDTag},
+			}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.in.MetaElements()
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}

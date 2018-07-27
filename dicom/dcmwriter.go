@@ -16,6 +16,7 @@ package dicom
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 )
 
@@ -28,6 +29,16 @@ func (dw *dcmWriter) Tag(order binary.ByteOrder, tag DataElementTag) error {
 		return err
 	}
 	return dw.UInt16(order, tag.ElementNumber())
+}
+
+func (dw *dcmWriter) Delimiter(order binary.ByteOrder, tag DataElementTag) error {
+	if err := dw.Tag(order, tag); err != nil {
+		return fmt.Errorf("writing delimiter tag: %v", err)
+	}
+	if err := dw.UInt32(order, 0); err != nil {
+		return fmt.Errorf("writing item length of delimiter: %v", err)
+	}
+	return nil
 }
 
 func (dw *dcmWriter) UInt16(order binary.ByteOrder, v uint16) error {

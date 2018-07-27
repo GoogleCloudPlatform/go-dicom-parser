@@ -183,10 +183,8 @@ func (c *encodingSystem) decode(element *DataElement) (*DataElement, error) {
 				return nil, fmt.Errorf("converting multi-fragment text to UTF-8 not supported")
 			}
 
-			utf8Reader := &countReader{coding.NewDecoder().Reader(bulkDataReader), bulkDataReader.Offset}
-
-			// TODO ParseOptions in should not depend on unexported methods/types)
-			element.ValueField = newOneShotIterator(utf8Reader)
+			utf8Reader := coding.NewDecoder().Reader(bulkDataReader)
+			element.ValueField = NewBulkDataIterator(utf8Reader, bulkDataReader.Offset)
 		}
 	}
 

@@ -12,17 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package dicom provides functions and data structures for manipulating the DICOM file format.
-// The package provides two ways of parsing the DICOM format. The simplest of these two ways is the
-// Parse function, which by default returns all the Data Elements of the DICOM object buffered in
-// memory as a DataSet. The more complicated of these two is the DataElementIterator which returns
-// DataElements one at a time and does not buffer.
-//
-// The Parse function and the DataElementIterator represent the ValueField of DataElements
-// differently. The Parse function by default buffers VRs of potentially enormous size
-// (SQ, OX, UN, UT, UR, UC) into memory. In contrast, the DataElementIterator does not buffer these
-// VRs and instead represents them as streaming interfaces. This is particularly useful for heavy
-// image processing.
 package dicom
 
 import (
@@ -39,7 +28,7 @@ import (
 // options sequentially in the order given to DataElements in the file.
 //
 // By default, BulkDataIterators are transformed into their appropriate buffered types for the VR:
-// [][]byte for OW, OB, UN
+// BulkDataBuffer for OW, OB, UN
 // []uint32 for OL
 // []float64 for OD
 // []float32 for OF
@@ -61,11 +50,11 @@ func Parse(r io.Reader, opts ...ParseOption) (*DataSet, error) {
 func CollectDataElements(iter DataElementIterator, opts ...ParseOption) (*DataSet, error) {
 	ds := &DataSet{map[DataElementTag]*DataElement{}, iter.Length()}
 
-	for elem, err := iter.NextElement(); err != io.EOF; elem, err = iter.NextElement() {
+	for elem, err := iter.Next(); err != io.EOF; elem, err = iter.Next() {
 		if err != nil {
 			return nil, err
 		}
-		processedElement, err := processElement(elem, iter.syntax().ByteOrder, opts...)
+		processedElement, err := processElement(elem, iter.syntax().byteOrder(), opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -93,7 +82,7 @@ func CollectSequence(iter SequenceIterator, opts ...ParseOption) (*Sequence, err
 	return seq, nil
 }
 
-// CollectFragments returns the sequence of byte slices defined by the sequence of ParseOption
+// CollectFragments returns the sequence of byte slices defined by the sequence of BulkDataReaders
 // in the BulkDataIterator. The BulkDataIterator will be closed.
 func CollectFragments(iter BulkDataIterator) ([][]byte, error) {
 	buff := make([][]byte, 0)
@@ -112,7 +101,7 @@ func CollectFragments(iter BulkDataIterator) ([][]byte, error) {
 }
 
 // CollectFragmentReferences returns the sequence of BulkDataReferences defined by the sequence of
-// ByteFragmentReaders in the BulkDataIterator. The given BulkDataIterator will be closed.
+// BulkDataReaders in the BulkDataIterator. The given BulkDataIterator will be closed.
 func CollectFragmentReferences(iter BulkDataIterator) ([]BulkDataReference, error) {
 	refs := make([]BulkDataReference, 0)
 	for r, err := iter.Next(); err != io.EOF; r, err = iter.Next() {
@@ -173,19 +162,20 @@ func applyOptions(element *DataElement, order binary.ByteOrder, opts ...ParseOpt
 
 func bufferBulkData(element *DataElement, order binary.ByteOrder) (*DataElement, error) {
 	if fragmentIterator, ok := element.ValueField.(BulkDataIterator); ok {
-		fragments, err := CollectFragments(fragmentIterator)
+		fragments, err := fragmentIterator.ToBuffer()
 		if err != nil {
-			return nil, fmt.Errorf("collecting fragments: %v", err)
+			return nil, fmt.Errorf("buffering fragments: %v", err)
 		}
+		buff := fragments.Data()
 		var valueField interface{}
 		if element.VR == OWVR || element.VR == OBVR || element.VR == UNVR {
 			valueField = fragments // preserve potentially multi-fragment types
-		} else if len(fragments) == 0 {
+		} else if len(buff) == 0 {
 			valueField, err = emptyFragmentForType(element.VR)
-		} else if len(fragments) == 1 {
-			valueField, err = decodeFragment(fragments[0], order, element.VR)
+		} else if len(buff) == 1 {
+			valueField, err = decodeFragment(fragments.Data()[0], order, element.VR)
 		} else {
-			return nil, fmt.Errorf("more than 1 fragments found for single fragment type: got %v, want 0 ot 1", len(fragments))
+			return nil, fmt.Errorf("more than 1 fragments found for single fragment type: got %v, want 0 or 1", len(buff))
 		}
 
 		return &DataElement{element.Tag, element.VR, valueField, element.ValueLength}, err

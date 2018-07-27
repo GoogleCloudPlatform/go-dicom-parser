@@ -25,14 +25,14 @@ type ParseOption struct {
 	transform func(*DataElement) (*DataElement, error)
 }
 
-// WithTransform returns a ParseOption that applies the given transformation to each DataElement in
+// ParseOptionWithTransform returns a ParseOption that applies the given transformation to each DataElement in
 // the DICOM file in the order encountered. For DataElements that contain a sequence, the transform
 // is applied to nested DataElements first (i.e. transform is called on DataElements in post-order).
 // If the transform returns an error, Parse will stop parsing and return an error.
 // If no error is returned and a non-nil DataElement is returned, this DataElement will be added to
 // the returned DataSet of Parse. If a nil DataElement is returned, this DataElement will be
 // excluded from the DataSet returned from Parse.
-func WithTransform(t func(*DataElement) (*DataElement, error)) ParseOption {
+func ParseOptionWithTransform(t func(*DataElement) (*DataElement, error)) ParseOption {
 	return ParseOption{t}
 }
 
@@ -40,13 +40,13 @@ func WithTransform(t func(*DataElement) (*DataElement, error)) ParseOption {
 // transformed to []BulkDataReference when bulkDataDefinition returns true and their default
 // buffered types otherwise
 func ReferenceBulkData(bulkDataDefinition func(*DataElement) bool) ParseOption {
-	return WithTransform(func(element *DataElement) (*DataElement, error) {
+	return ParseOptionWithTransform(func(element *DataElement) (*DataElement, error) {
 		return referenceBulkData(element, bulkDataDefinition)
 	})
 }
 
 // DropGroupLengths will exclude all group length elements (gggg,0000) from the returned DataSet
-var DropGroupLengths = WithTransform(func(element *DataElement) (*DataElement, error) {
+var DropGroupLengths = ParseOptionWithTransform(func(element *DataElement) (*DataElement, error) {
 	if element.Tag.ElementNumber() == 0 {
 		return nil, nil
 	}
@@ -56,7 +56,7 @@ var DropGroupLengths = WithTransform(func(element *DataElement) (*DataElement, e
 // DropBasicOffsetTable will exclude the basic offset table fragment from pixel data encoded using
 // the encapsulated (compressed) format. For more information on the offset table and encapsulated
 // formats please see http://dicom.nema.org/medical/dicom/current/output/html/part05.html#sect_A.4.
-var DropBasicOffsetTable = WithTransform(func(element *DataElement) (*DataElement, error) {
+var DropBasicOffsetTable = ParseOptionWithTransform(func(element *DataElement) (*DataElement, error) {
 	iter, ok := element.ValueField.(BulkDataIterator)
 	if !ok {
 		return element, nil
@@ -80,7 +80,7 @@ func DefaultBulkDataDefinition(elem *DataElement) bool {
 // SplitUncompressedPixelDataFrames returns an option that ensures Data Elements with
 // uncompressed pixel data (7FE0,0010) respect the image pixel module tags if present.
 // i.e. If a DataElement corresponds to pixel data (7FE0,0010) each element of the ValueField slice
-// (type [][]byte or []BulkDataReference) will represent an image frame. If ValueField is a
+// (type BulkDataBuffer or []BulkDataReference) will represent an image frame. If ValueField is a
 // BulkDataIterator, each BulkDataReader within the iterator will be an image frame. If image module
 // tags are encountered that do not conform to the Image Pixel Module IOD linked below, the pixel
 // data will be excluded from the returned DataSet.
@@ -96,7 +96,7 @@ func SplitUncompressedPixelDataFrames() ParseOption {
 		NumberOfFramesTag:  0,
 	}
 
-	return WithTransform(func(element *DataElement) (*DataElement, error) {
+	return ParseOptionWithTransform(func(element *DataElement) (*DataElement, error) {
 		if element.ValueLength <= 0 {
 			return element, nil
 		}
@@ -197,6 +197,14 @@ func (it *nativeMultiFrame) Next() (*BulkDataReader, error) {
 	return it.currentFrame, nil
 }
 
+func (it *nativeMultiFrame) ToBuffer() (BulkDataBuffer, error) {
+	frames, err := CollectFragments(it)
+	if err != nil {
+		return nil, fmt.Errorf("collecting frames from native multi-frame: %v", err)
+	}
+	return NewBulkDataBuffer(frames...), nil
+}
+
 func (it *nativeMultiFrame) Close() error {
 	for _, err := it.Next(); err != io.EOF; _, err = it.Next() {
 		if err != nil {
@@ -204,6 +212,10 @@ func (it *nativeMultiFrame) Close() error {
 		}
 	}
 	return nil
+}
+
+func (it *nativeMultiFrame) Length() int64 {
+	return it.numberOfFrames * it.frameLength
 }
 
 func (it *nativeMultiFrame) write(w io.Writer, syntax transferSyntax) error {
@@ -231,7 +243,7 @@ func referenceBulkData(element *DataElement, isBulkData func(*DataElement) bool)
 func UTF8TextOption() ParseOption {
 	dataSetEncoding := defaultEncodingSystem()
 
-	return WithTransform(func(element *DataElement) (*DataElement, error) {
+	return ParseOptionWithTransform(func(element *DataElement) (*DataElement, error) {
 		if element.Tag == SpecificCharacterSetTag {
 			specificCodingSystem, err := newEncodingSystem(element)
 			if err != nil {

@@ -16,17 +16,18 @@ package dicom
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"testing"
 )
 
 func TestConstruct(t *testing.T) {
-	var setElementLengthsToZero = WithTransform(func(element *DataElement) (*DataElement, error) {
+	var setElementLengthsToZero = ParseOptionWithTransform(func(element *DataElement) (*DataElement, error) {
 		element.ValueLength = 0
 		return element, nil
 	})
-	var noMetaGroupLength = WithTransform(func(element *DataElement) (*DataElement, error) {
+	var noMetaGroupLength = ParseOptionWithTransform(func(element *DataElement) (*DataElement, error) {
 		if element.Tag == FileMetaInformationGroupLengthTag {
 			return nil, nil
 		}
@@ -44,6 +45,11 @@ func TestConstruct(t *testing.T) {
 			[]ParseOption{},
 		},
 		{
+			"explicit VR little endian syntax with explicit lengths",
+			"ExplicitVRLittleEndian.dcm",
+			[]ParseOption{},
+		},
+		{
 			"explicit VR little endian syntax with no element lengths set",
 			"ExplicitVRLittleEndianUndefLen.dcm",
 			[]ParseOption{setElementLengthsToZero},
@@ -51,6 +57,11 @@ func TestConstruct(t *testing.T) {
 		{
 			"implicit VR little endian syntax with undefined seq & item lengths",
 			"ImplicitVRLittleEndianUndefLen.dcm",
+			[]ParseOption{},
+		},
+		{
+			"implicit VR little endian syntax with explicit lengths",
+			"ImplicitVRLittleEndian.dcm",
 			[]ParseOption{},
 		},
 		{
@@ -142,6 +153,72 @@ func TestConstruct_NoVR(t *testing.T) {
 	}
 }
 
+func TestConstruct_BulkData(t *testing.T) {
+	pixels := []byte("asbcdegh")
+	tests := []struct {
+		name      string
+		pixelData DataElementValue
+		expected  BulkDataBuffer
+	}{
+		{
+			"BulkDataIterator with explicit length",
+			NewBulkDataIteratorWithLength(bytes.NewReader(pixels), 0 /*offset*/, int64(len(pixels))),
+			NewBulkDataBuffer(pixels),
+		},
+		{
+			"BulkDataIterator with 0 length",
+			NewBulkDataIteratorWithLength(bytes.NewReader([]byte{}), 0 /*offset*/, int64(0)),
+			NewBulkDataBuffer([]byte{}),
+		},
+		{
+			"Native BulkDataBuffer",
+			NewBulkDataBuffer(pixels),
+			NewBulkDataBuffer(pixels),
+		},
+		{
+			"Native BulkDataBuffer with odd length",
+			NewBulkDataBuffer([]byte{'a'}),
+			NewBulkDataBuffer([]byte{'a', 0x00}),
+		},
+		{
+			"Encapsulated BulkDataBuffer",
+			NewEncapsulatedFormatBuffer(nil, pixels),
+			NewEncapsulatedFormatBuffer(nil, pixels),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ds := minimalDataSet.Merge(NewDataSet(map[DataElementTag]interface{}{
+				PixelDataTag: tc.pixelData,
+			}))
+
+			buf := &bytes.Buffer{}
+			if err := Construct(buf, ds); err != nil {
+				t.Fatalf("Construct(_, %v) => %v, expected nil error", ds, err)
+			}
+
+			actualDS, err := Parse(buf)
+			if err != nil {
+				t.Fatalf("Parse => %v", err)
+			}
+
+			actualPixelData, ok := actualDS.Elements[PixelDataTag].ValueField.(BulkDataBuffer)
+			if !ok {
+				t.Fatalf("expected PixelData to be BulkDataBuffer but found %T", actualDS.Elements[PixelDataTag].ValueField)
+			}
+			if len(tc.expected.Data()) != len(actualPixelData.Data()) {
+				t.Fatalf("expected %d fragments but found %d", len(tc.expected.Data()), len(actualPixelData.Data()))
+			}
+			for i := 0; i < len(tc.expected.Data()); i++ {
+				if !bytes.Equal(tc.expected.Data()[i], actualPixelData.Data()[i]) {
+					t.Errorf("index %d: expected PixelData = %s but found %s", i, string(tc.expected.Data()[i]), string(actualPixelData.Data()[i]))
+				}
+			}
+		})
+	}
+}
+
 func TestConstruct_InvalidDataSet(t *testing.T) {
 	tests := []struct {
 		name string
@@ -149,25 +226,27 @@ func TestConstruct_InvalidDataSet(t *testing.T) {
 	}{
 		{
 			"nil cannot be written",
-			&DataSet{Elements: map[DataElementTag]*DataElement{
-				0: {Tag: PixelDataTag, VR: OBVR, ValueField: nil},
-			}},
+			NewDataSet(map[DataElementTag]interface{}{
+				PixelDataTag: nil,
+			}),
 		},
 		{
 			"empty []BulkDataReference cannot be written",
-			&DataSet{Elements: map[DataElementTag]*DataElement{
-				0: {Tag: PixelDataTag, VR: OBVR, ValueField: []BulkDataReference{}},
-			}},
+			NewDataSet(map[DataElementTag]interface{}{
+				PixelDataTag: []BulkDataReference{},
+			}),
 		},
 		{
 			"non-empty []BulkDataReference cannot be written",
-			&DataSet{Elements: map[DataElementTag]*DataElement{
-				0: {
-					Tag:        PixelDataTag,
-					VR:         OBVR,
-					ValueField: []BulkDataReference{{ByteRegion{1, 2}}}},
-			},
-			},
+			NewDataSet(map[DataElementTag]interface{}{
+				PixelDataTag: []BulkDataReference{{ByteRegion{1, 2}}},
+			}),
+		},
+		{
+			"BulkDataIterator without explicit length",
+			NewDataSet(map[DataElementTag]interface{}{
+				PixelDataTag: NewBulkDataIterator(bytes.NewBuffer([]byte("blhblah")), 0),
+			}),
 		},
 	}
 
@@ -177,6 +256,35 @@ func TestConstruct_InvalidDataSet(t *testing.T) {
 				t.Fatal("expected an error to be returned")
 			}
 		})
+	}
+}
+
+func TestConstructOptions_Recursion(t *testing.T) {
+	childFound := false
+	var lookForChild = ConstructOptionWithTransform(func(element *DataElement) (*DataElement, error) {
+		if element.Tag == ReferencedImageSequenceTag {
+			childFound = true
+		}
+		return element, nil
+	})
+
+	dataSet := parse("ExplicitVRLittleEndian.dcm", t)
+	if err := Construct(bytes.NewBuffer([]byte{}), dataSet, lookForChild); err != nil {
+		t.Fatalf("Construct: %v", err)
+	}
+
+	if !childFound {
+		t.Fatalf("expected the nested data element to be visited")
+	}
+}
+
+func TestConstructOptions_Error(t *testing.T) {
+	var errorConstruct = ConstructOptionWithTransform(func(element *DataElement) (*DataElement, error) {
+		return nil, fmt.Errorf("producing expected error")
+	})
+	dataSet := parse("ExplicitVRLittleEndian.dcm", t)
+	if err := Construct(bytes.NewBuffer([]byte{}), dataSet, errorConstruct); err == nil {
+		t.Fatalf("expected error to be returned")
 	}
 }
 
@@ -205,6 +313,6 @@ func compareFiles(t *testing.T, got, want io.Reader) {
 		t.Fatalf("reading expected bytes: %v", err)
 	}
 	if !bytes.Equal(gotBytes, wantBytes) {
-		t.Fatalf("got %v, want %v", gotBytes, wantBytes)
+		t.Fatalf("got %v\n, want %v", gotBytes, wantBytes)
 	}
 }

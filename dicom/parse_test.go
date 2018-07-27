@@ -44,6 +44,24 @@ func TestParse(t *testing.T) {
 			createExpectedDataSet(bufferedPixelData, 198, ExplicitVRLittleEndianUID),
 		},
 		{
+			"Parse Explicit VR Big Endian",
+			parseInput{
+				"ExplicitVRBigEndian.dcm",
+				explicitVRBigEndian,
+				nil,
+			},
+			createExpectedDataSet(bufferedPixelData, 198, ExplicitVRBigEndianUID),
+		},
+		{
+			"Parse Explicit VR Big Endian with undefined lengths",
+			parseInput{
+				"ExplicitVRBigEndianUndefLen.dcm",
+				explicitVRBigEndian,
+				nil,
+			},
+			createExpectedDataSet(bufferedPixelData, 198, ExplicitVRBigEndianUID),
+		},
+		{
 			"Parse Explicit VR Little Endian with undefined lengths",
 			parseInput{
 				"ExplicitVRLittleEndianUndefLen.dcm",
@@ -77,7 +95,7 @@ func TestParse(t *testing.T) {
 				explicitVRLittleEndian,
 				[]ParseOption{ReferenceBulkData(DefaultBulkDataDefinition)},
 			},
-			createExpectedDataSet(referencedPixelDataElement(428, 4), 198, ExplicitVRLittleEndianUID),
+			createExpectedDataSet(referencedPixelDataElement(462, 4), 198, ExplicitVRLittleEndianUID),
 		},
 		{
 			"when no options transform BulkDataIterators, we still buffer BulkDataIterators",
@@ -92,7 +110,7 @@ func TestParse(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			compareDataSets(parse(tc.in.file, t, tc.in.opts...), tc.want, tc.in.syntax.ByteOrder, t)
+			compareDataSets(parse(tc.in.file, t, tc.in.opts...), tc.want, tc.in.syntax.byteOrder(), t)
 		})
 	}
 }
@@ -108,14 +126,14 @@ func TestParse_dataSetLengths(t *testing.T) {
 		{
 			"sequence item lengths are respected in the ExplicitVRLittleEndian format",
 			"ExplicitVRLittleEndian.dcm",
-			54,
-			34,
+			88,
+			68,
 		},
 		{
 			"sequence item lengths are respected in ImplicitVRLittleEndian format",
 			"ImplicitVRLittleEndian.dcm",
-			50,
-			34,
+			84,
+			68,
 		},
 		{
 			"sequence item lengths are respected in ExplicitVRLittleEndian format with undefined lengths",
@@ -252,7 +270,7 @@ func TestParse_multiFrameSupport(t *testing.T) {
 			"when the file is in encapsulated format, fragments are untouched",
 			"MultiFrameCompressed.dcm",
 			[]ParseOption{SplitUncompressedPixelDataFrames()},
-			&DataElement{PixelDataTag, OBVR, append([][]byte{{}}, frames...), 24},
+			&DataElement{PixelDataTag, OBVR, NewEncapsulatedFormatBuffer([]byte{}, frames...), 24},
 		},
 		{
 			"when the file is encapsulated format and the ReferenceBulkData is used, " +
@@ -265,7 +283,7 @@ func TestParse_multiFrameSupport(t *testing.T) {
 			"when the file is native format, fragments are transformed into frames",
 			"MultiFrameUncompressed.dcm",
 			[]ParseOption{SplitUncompressedPixelDataFrames()},
-			&DataElement{PixelDataTag, OWVR, frames, 24},
+			&DataElement{PixelDataTag, OWVR, NewBulkDataBuffer(frames...), 24},
 		},
 		{
 			"when the file is native format, and given ReferenceBulkData, fragments are " +
@@ -279,7 +297,7 @@ func TestParse_multiFrameSupport(t *testing.T) {
 				"affected by UTF-8",
 			"MultiFrameUncompressed.dcm",
 			[]ParseOption{UTF8TextOption(), SplitUncompressedPixelDataFrames()},
-			&DataElement{PixelDataTag, OWVR, frames, 24},
+			&DataElement{PixelDataTag, OWVR, NewBulkDataBuffer(frames...), 24},
 		},
 		{
 			"When given UTF8TextOption, SplitUncompressedPixelDataFrames, ReferenceBulkData, " +
@@ -345,130 +363,130 @@ func TestBufferBulkData(t *testing.T) {
 	}{
 		{
 			"when ValueField has OB VR, empty input produces empty slice",
-			createDataElement(1, OBVR, emptyBulkDataIterator{}, 0),
+			&DataElement{1, OBVR, emptyBulkDataIterator{}, 0},
 			binary.LittleEndian,
-			createDataElement(1, OBVR, [][]byte{}, 0),
+			&DataElement{1, OBVR, NewBulkDataBuffer(), 0},
 		},
 		{
 			"when ValueField has OB VR",
-			createDataElement(FileMetaInformationVersionTag, OBVR, createBulkDataIterator(sampleBytes), length),
+			&DataElement{FileMetaInformationVersionTag, OBVR, createBulkDataIterator(sampleBytes), length},
 			binary.LittleEndian,
-			createDataElement(FileMetaInformationVersionTag, OBVR, [][]byte{sampleBytes}, length),
+			&DataElement{FileMetaInformationVersionTag, OBVR, NewBulkDataBuffer(sampleBytes), length},
 		},
 		{
 			"when ValueField has OW VR, empty input produces empty slice",
-			createDataElement(1, OBVR, emptyBulkDataIterator{}, 0),
+			&DataElement{1, OBVR, emptyBulkDataIterator{}, 0},
 			binary.LittleEndian,
-			createDataElement(1, OBVR, [][]byte{}, 0),
+			&DataElement{1, OBVR, NewBulkDataBuffer(), 0},
 		},
 		{
 			"when ValueField has OW VR in little endian",
-			createDataElement(PixelDataTag, OBVR, createBulkDataIterator(sampleBytes), length),
+			&DataElement{PixelDataTag, OBVR, createBulkDataIterator(sampleBytes), length},
 			binary.LittleEndian,
-			createDataElement(PixelDataTag, OBVR, [][]byte{sampleBytes}, length),
+			&DataElement{PixelDataTag, OBVR, NewBulkDataBuffer(sampleBytes), length},
 		},
 		{
 			"when ValueField has OW VR in big endian",
-			createDataElement(PixelDataTag, OWVR, createBulkDataIterator(sampleBytes), length),
+			&DataElement{PixelDataTag, OWVR, createBulkDataIterator(sampleBytes), length},
 			binary.BigEndian,
-			createDataElement(PixelDataTag, OWVR, [][]byte{sampleBytes}, length),
+			&DataElement{PixelDataTag, OWVR, NewBulkDataBuffer(sampleBytes), length},
 		},
 		{
 			"when ValueField has UN VR",
-			createDataElement(1, UNVR, createBulkDataIterator(sampleBytes), length),
+			&DataElement{1, UNVR, createBulkDataIterator(sampleBytes), length},
 			binary.LittleEndian,
-			createDataElement(1, UNVR, [][]byte{sampleBytes}, length),
+			&DataElement{1, UNVR, NewBulkDataBuffer(sampleBytes), length},
 		},
 		{
 			"when ValueField has UN VR empty input produces empty slice",
-			createDataElement(1, UNVR, emptyBulkDataIterator{}, 0),
+			&DataElement{1, UNVR, emptyBulkDataIterator{}, 0},
 			binary.LittleEndian,
-			createDataElement(1, UNVR, [][]byte{}, 0),
+			&DataElement{1, UNVR, NewBulkDataBuffer(), 0},
 		},
 		{
 			"when ValueField has OF VR, empty input produces empty slice",
-			createDataElement(1, OFVR, emptyBulkDataIterator{}, 0),
+			&DataElement{1, OFVR, emptyBulkDataIterator{}, 0},
 			binary.LittleEndian,
-			createDataElement(1, OFVR, []float32{}, 0),
+			&DataElement{1, OFVR, []float32{}, 0},
 		},
 		{
 			"when ValueField has OF VR in big endian",
-			createDataElement(1, OFVR, createBulkDataIterator([]byte{0x3F, 0xC0, 0, 0}), 4),
+			&DataElement{1, OFVR, createBulkDataIterator([]byte{0x3F, 0xC0, 0, 0}), 4},
 			binary.BigEndian,
-			createDataElement(1, OFVR, []float32{1.5}, length),
+			&DataElement{1, OFVR, []float32{1.5}, length},
 		},
 		{
 			"when ValueField has OF VR in big endian with vm > 1",
-			createDataElement(1, OFVR, createBulkDataIterator([]byte{0x3F, 0xC0, 0, 0, 0x3F, 0xC0, 0, 0}), 8),
+			&DataElement{1, OFVR, createBulkDataIterator([]byte{0x3F, 0xC0, 0, 0, 0x3F, 0xC0, 0, 0}), 8},
 			binary.BigEndian,
-			createDataElement(1, OFVR, []float32{1.5, 1.5}, 8),
+			&DataElement{1, OFVR, []float32{1.5, 1.5}, 8},
 		},
 		{
 			"when ValueField has OF VR in little endian",
-			createDataElement(1, OFVR, createBulkDataIterator([]byte{0, 0, 0xC0, 0x3F}), 4),
+			&DataElement{1, OFVR, createBulkDataIterator([]byte{0, 0, 0xC0, 0x3F}), 4},
 			binary.LittleEndian,
-			createDataElement(1, OFVR, []float32{1.5}, length),
+			&DataElement{1, OFVR, []float32{1.5}, length},
 		},
 		{
 			"when ValueField has OD VR, empty input produces empty slice",
-			createDataElement(1, ODVR, emptyBulkDataIterator{}, 0),
+			&DataElement{1, ODVR, emptyBulkDataIterator{}, 0},
 			binary.LittleEndian,
-			createDataElement(1, ODVR, []float64{}, 0),
+			&DataElement{1, ODVR, []float64{}, 0},
 		},
 		{
 			"when ValueField has OD VR in big endian",
-			createDataElement(1, ODVR, createBulkDataIterator([]byte{0x3F, 0xF8, 0, 0, 0, 0, 0, 0}), 8),
+			&DataElement{1, ODVR, createBulkDataIterator([]byte{0x3F, 0xF8, 0, 0, 0, 0, 0, 0}), 8},
 			binary.BigEndian,
-			createDataElement(1, ODVR, []float64{1.5}, 8),
+			&DataElement{1, ODVR, []float64{1.5}, 8},
 		},
 		{
 			"when ValueField has OD VR in little endian",
-			createDataElement(1, ODVR, createBulkDataIterator([]byte{0, 0, 0, 0, 0, 0, 0xF8, 0x3F}), 8),
+			&DataElement{1, ODVR, createBulkDataIterator([]byte{0, 0, 0, 0, 0, 0, 0xF8, 0x3F}), 8},
 			binary.LittleEndian,
-			createDataElement(1, ODVR, []float64{1.5}, 8),
+			&DataElement{1, ODVR, []float64{1.5}, 8},
 		},
 		{
 			"when ValueField has OD VR in little endian with vm > 1",
-			createDataElement(1, ODVR,
-				createBulkDataIterator([]byte{0, 0, 0, 0, 0, 0, 0xF8, 0x3F, 0, 0, 0, 0, 0, 0, 0xF8, 0x3F}), 16),
+			&DataElement{1, ODVR,
+				createBulkDataIterator([]byte{0, 0, 0, 0, 0, 0, 0xF8, 0x3F, 0, 0, 0, 0, 0, 0, 0xF8, 0x3F}), 16},
 			binary.LittleEndian,
-			createDataElement(1, ODVR, []float64{1.5, 1.5}, 16),
+			&DataElement{1, ODVR, []float64{1.5, 1.5}, 16},
 		},
 		{
 			"when Value Field has UC VR, empty input produces empty slice",
-			createDataElement(1, UCVR, emptyBulkDataIterator{}, 0),
+			&DataElement{1, UCVR, emptyBulkDataIterator{}, 0},
 			binary.LittleEndian,
-			createDataElement(1, UCVR, []string{}, 0),
+			&DataElement{1, UCVR, []string{}, 0},
 		},
 		{
 			"when ValueField has UC VR with vm > 1 with trailing spaces",
-			createDataElement(1, UCVR, createBulkDataIterator([]byte("abcd \\gef ")), 10),
+			&DataElement{1, UCVR, createBulkDataIterator([]byte("abcd \\gef ")), 10},
 			binary.LittleEndian,
-			createDataElement(1, UCVR, []string{"abcd ", "gef "}, 10),
+			&DataElement{1, UCVR, []string{"abcd ", "gef "}, 10},
 		},
 		{
 			"when ValueField has UR VR, empty input produces empty slice",
-			createDataElement(1, URVR, emptyBulkDataIterator{}, 0),
+			&DataElement{1, URVR, emptyBulkDataIterator{}, 0},
 			binary.LittleEndian,
-			createDataElement(1, URVR, []string{}, 0),
+			&DataElement{1, URVR, []string{}, 0},
 		},
 		{
 			"when ValueField has UR VR, trailing spaces are removed",
-			createDataElement(1, URVR, createBulkDataIterator([]byte("abcdgef \r\n")), 12),
+			&DataElement{1, URVR, createBulkDataIterator([]byte("abcdgef \r\n")), 12},
 			binary.LittleEndian,
-			createDataElement(1, URVR, []string{"abcdgef"}, 12),
+			&DataElement{1, URVR, []string{"abcdgef"}, 12},
 		},
 		{
 			"when ValueField has UT VR, empty input produce empty slice",
-			createDataElement(1, UTVR, emptyBulkDataIterator{}, 0),
+			&DataElement{1, UTVR, emptyBulkDataIterator{}, 0},
 			binary.LittleEndian,
-			createDataElement(1, UTVR, []string{}, 0),
+			&DataElement{1, UTVR, []string{}, 0},
 		},
 		{
 			"when ValueField has UT VR, trailing spaces are ignored and backslashes are allowed",
-			createDataElement(1, UTVR, createBulkDataIterator([]byte("abcd\\\\ \r\r\n")), 12),
+			&DataElement{1, UTVR, createBulkDataIterator([]byte("abcd\\\\ \r\r\n")), 12},
 			binary.LittleEndian,
-			createDataElement(1, UTVR, []string{"abcd\\\\"}, 12),
+			&DataElement{1, UTVR, []string{"abcd\\\\"}, 12},
 		},
 	}
 
@@ -521,6 +539,14 @@ func (emptyBulkDataIterator) Close() error {
 	return nil
 }
 
+func (emptyBulkDataIterator) ToBuffer() (BulkDataBuffer, error) {
+	return NewBulkDataBuffer(), nil
+}
+
+func (emptyBulkDataIterator) Length() int64 {
+	return 0
+}
+
 func (emptyBulkDataIterator) write(w io.Writer, syntax transferSyntax) error {
 	return nil
 }
@@ -539,7 +565,7 @@ func parse(file string, t *testing.T, opts ...ParseOption) *DataSet {
 
 func referencedPixelDataElement(offset, length int) *DataElement {
 	refs := []BulkDataReference{{ByteRegion{int64(offset), int64(length)}}}
-	return createDataElement(PixelDataTag, OWVR, refs, uint32(length))
+	return &DataElement{PixelDataTag, OWVR, refs, uint32(length)}
 }
 
 func createExpectedDataSet(pixelElement *DataElement, metaLength uint32, transferSyntaxUID string) *DataSet {
@@ -567,7 +593,7 @@ func createExpectedDataSet(pixelElement *DataElement, metaLength uint32, transfe
 }
 
 func excludeTagRange(start, end DataElementTag) ParseOption {
-	return WithTransform(func(element *DataElement) (*DataElement, error) {
+	return ParseOptionWithTransform(func(element *DataElement) (*DataElement, error) {
 		if start <= element.Tag && element.Tag <= end {
 			// in range. exclude it by returning nil
 			return nil, nil

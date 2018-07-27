@@ -20,6 +20,46 @@ import (
 )
 
 func TestWriteDateElement(t *testing.T) {
+	fragments := [][]byte{{0x12, 0x23}, {0x45, 0x67}}
+	offsetTable := []byte{
+		0x00, 0x00, 0x00, 0x00, // Offset Table Item 1
+		0x0A, 0x00, 0x00, 0x00, // Offset Table item 2
+	}
+	encapsulatedFormatWithoutOffsetTable := []byte{
+		0xE0, 0x7F, 0x10, 0x00, // Tag
+		'O', 'B', // VR
+		0x00, 0x00, // Reserved Bytes
+		0xFF, 0xFF, 0xFF, 0xFF, // Undefined Length
+		0xFE, 0xFF, 0x00, 0xE0, // Item Tag
+		0x00, 0x00, 0x00, 0x00, // Item Length
+		0xFE, 0xFF, 0x00, 0xE0, // Item Tag
+		0x02, 0x00, 0x00, 0x00, // Item Length
+		0x12, 0x23, // Fragment Item Bytes
+		0xFE, 0xFF, 0x00, 0xE0, // Item Tag
+		0x02, 0x00, 0x00, 0x00, // Item Length
+		0x45, 0x67, // Fragment Item Bytes
+		0xFE, 0xFF, 0xDD, 0xE0, // Sequence delimitation Tag
+		0x00, 0x00, 0x00, 0x00, // Item Length
+	}
+	encapsulatedFormatWithOffsetTable := []byte{
+		0xE0, 0x7F, 0x10, 0x00, // Tag
+		'O', 'B', // VR
+		0x00, 0x00, // Reserved Bytes
+		0xFF, 0xFF, 0xFF, 0xFF, // Undefined Length
+		0xFE, 0xFF, 0x00, 0xE0, // Item Tag
+		0x08, 0x00, 0x00, 0x00, // Item Length
+		0x00, 0x00, 0x00, 0x00, // Offset Table Item 1
+		0x0A, 0x00, 0x00, 0x00, // Offset Table Item 2
+		0xFE, 0xFF, 0x00, 0xE0, // Item Tag
+		0x02, 0x00, 0x00, 0x00, // Item Length
+		0x12, 0x23, // Fragment Item Bytes
+		0xFE, 0xFF, 0x00, 0xE0, // Item Tag
+		0x02, 0x00, 0x00, 0x00, // Item Length
+		0x45, 0x67, // Fragment Item Bytes
+		0xFE, 0xFF, 0xDD, 0xE0, // Sequence delimitation Tag
+		0x00, 0x00, 0x00, 0x00, // Item Length
+	}
+
 	tests := []struct {
 		name   string
 		in     *DataElement
@@ -28,85 +68,82 @@ func TestWriteDateElement(t *testing.T) {
 	}{
 		{
 			"writing element with empty []string",
-			&DataElement{Tag: ImplementationVersionNameTag, ValueField: []string{}},
+			&DataElement{Tag: ImplementationVersionNameTag, VR: SHVR, ValueField: []string{}, ValueLength: 0},
 			explicitVRLittleEndian,
 			[]byte{0x02, 0x00, 0x13, 0x00, 'S', 'H', 0, 0},
 		},
 		{
 			"writing element with empty []int",
-			&DataElement{Tag: SimpleFrameListTag, ValueField: []uint32{}},
+			&DataElement{Tag: SimpleFrameListTag, VR: ULVR, ValueField: []uint32{}, ValueLength: 0},
 			explicitVRLittleEndian,
 			[]byte{0x08, 0x00, 0x61, 0x11, 'U', 'L', 0, 0},
 		},
 		{
 			"writing odd length []int in the explicit syntax",
-			&DataElement{Tag: SimpleFrameListTag, ValueField: []uint32{7}},
+			&DataElement{Tag: SimpleFrameListTag, VR: ULVR, ValueField: []uint32{7}, ValueLength: 4},
 			explicitVRLittleEndian,
 			[]byte{0x08, 0x00, 0x61, 0x11, 'U', 'L', 0x04, 0x00, 0x07, 0x00, 0x00, 0x00},
 		},
 		{
-			"writing odd length []int in the implicit syntax",
-			&DataElement{Tag: SimpleFrameListTag, ValueField: []uint32{7}},
-			implicitVRLittleEndian,
-			[]byte{0x08, 0x00, 0x61, 0x11, 0x04, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00},
-		},
-		{
 			"writing odd length []string in the explicit syntax",
-			&DataElement{Tag: ImplementationVersionNameTag, ValueField: []string{"abc"}},
+			&DataElement{Tag: ImplementationVersionNameTag, VR: SHVR, ValueField: []string{"abc"}, ValueLength: 4},
 			explicitVRLittleEndian,
 			[]byte{0x02, 0x00, 0x13, 0x00, 'S', 'H', 0x04, 0x00, 'a', 'b', 'c', ' '},
 		},
 		{
 			"writing []string with multiple values",
-			&DataElement{Tag: ImplementationVersionNameTag, ValueField: []string{"abc", "de"}},
+			&DataElement{Tag: ImplementationVersionNameTag, VR: SHVR, ValueField: []string{"abc", "de"}, ValueLength: 6},
 			explicitVRLittleEndian,
 			[]byte{0x02, 0x00, 0x13, 0x00, 'S', 'H', 0x06, 0x00, 'a', 'b', 'c', '\\', 'd', 'e'},
 		},
 		{
 			"writing []string with multiple values that requires padding",
-			&DataElement{Tag: ImplementationVersionNameTag, ValueField: []string{"AB", "DE"}},
+			&DataElement{Tag: ImplementationVersionNameTag, VR: SHVR, ValueField: []string{"AB", "DE"}, ValueLength: 6},
 			explicitVRLittleEndian,
 			[]byte{0x02, 0x00, 0x13, 0x00, 'S', 'H', 0x06, 0x00, 'A', 'B', '\\', 'D', 'E', ' '},
 		},
 		{
-			"writing []int with multiple values in the implicit syntax",
-			&DataElement{Tag: SimpleFrameListTag, ValueField: []uint32{0x1234ABCD, 0xABCD1234}},
-			implicitVRLittleEndian,
-			[]byte{0x08, 0x00, 0x61, 0x11, 0x08, 0x00, 0x00, 0x00, 0xCD, 0xAB, 0x34, 0x12, 0x34, 0x12, 0xCD, 0xAB},
-		},
-		{
 			"writing UI element is padded with correct characters",
-			&DataElement{Tag: MediaStorageSOPClassUIDTag, ValueField: []string{"1.2"}},
+			&DataElement{Tag: MediaStorageSOPClassUIDTag, VR: UIVR, ValueField: []string{"1.2"}, ValueLength: 4},
 			explicitVRLittleEndian,
 			[]byte{0x02, 0x00, 0x02, 0x00, 'U', 'I', 0x04, 0x00, '1', '.', '2', 0x00},
 		},
 		{
 			"writing odd length []int in the big endian syntax",
-			&DataElement{Tag: SimpleFrameListTag, ValueField: []uint32{0x1234ABCD, 0xABCD1234}},
+			&DataElement{Tag: SimpleFrameListTag, VR: ULVR, ValueField: []uint32{0x1234ABCD, 0xABCD1234}, ValueLength: 8},
 			explicitVRBigEndian,
 			[]byte{0x00, 0x08, 0x11, 0x61, 'U', 'L', 0x00, 0x08, 0x12, 0x34, 0xAB, 0xCD, 0xAB, 0xCD, 0x12, 0x34},
 		},
 		{
 			"writing []uint16 in the big endian syntax",
-			&DataElement{Tag: IdentifyingPrivateElementsTag, ValueField: []uint16{0x1234, 0xABCD}},
+			&DataElement{Tag: IdentifyingPrivateElementsTag, VR: USVR, ValueField: []uint16{0x1234, 0xABCD}, ValueLength: 4},
 			explicitVRBigEndian,
 			[]byte{0x00, 0x08, 0x03, 0x06, 'U', 'S', 0x00, 0x04, 0x12, 0x34, 0xAB, 0xCD},
 		},
 		{
-			"writing private tag with []int16 in the explicit syntax",
-			&DataElement{Tag: DataElementTag(0x00000001), ValueField: []int16{0x12}},
+			"writing AT VR in little endian",
+			&DataElement{
+				Tag: FrameIncrementPointerTag,
+				VR:  ATVR, ValueField: []uint32{0x12345678, 0x12345678},
+				ValueLength: 8,
+			},
 			explicitVRLittleEndian,
-			[]byte{0x00, 0x00, 0x01, 0x00, 'U', 'N', 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x12, 0x00},
+			[]byte{0x28, 0x00, 0x09, 0x00, 'A', 'T', 0x08, 0x00, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56},
 		},
 		{
-			"writing private tag with []uint32 in the implicit syntax",
-			&DataElement{Tag: DataElementTag(0x00000001), ValueField: []int32{0x12}},
-			implicitVRLittleEndian,
-			[]byte{0x00, 0x00, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00},
+			"writing AT VR in big endian",
+			&DataElement{
+				Tag:         FrameIncrementPointerTag,
+				VR:          ATVR,
+				ValueField:  []uint32{0x12345678, 0x12345678},
+				ValueLength: 8,
+			},
+			explicitVRBigEndian,
+			[]byte{0x00, 0x28, 0x00, 0x09, 'A', 'T', 0x00, 0x08, 0x12, 0x34, 0x56, 0x78, 0x12, 0x34, 0x56, 0x78},
 		},
 		{
-			"sequences of explicit length are currently written as undefined length",
-			&DataElement{Tag: ReferencedCurveSequenceTag, ValueField: &Sequence{Items: []*DataSet{}}},
+			"sequences of undefined length are currently written as undefined length",
+			&DataElement{Tag: ReferencedCurveSequenceTag, VR: SQVR, ValueField: &Sequence{Items: []*DataSet{}}, ValueLength: UndefinedLength},
 			explicitVRLittleEndian,
 			[]byte{
 				0x08, 0x00, 0x45, 0x11, // Tag
@@ -117,11 +154,67 @@ func TestWriteDateElement(t *testing.T) {
 			},
 		},
 		{
-			"writing encapsulated format iterator without offset table",
+			"sequences of explicit length are currently written as explicit length",
+			&DataElement{Tag: ReferencedCurveSequenceTag, VR: SQVR, ValueField: &Sequence{Items: []*DataSet{}}, ValueLength: 0},
+			explicitVRLittleEndian,
+			[]byte{
+				0x08, 0x00, 0x45, 0x11, // Tag
+				'S', 'Q', // VR
+				0x00, 0x00, // Reserved bytes
+				0x00, 0x00, 0x00, 0x00, // Zero Length
+			},
+		},
+		{
+			"writing EncapsulatedFormatIterator without offset table",
 			&DataElement{
-				Tag:        PixelDataTag,
-				VR:         OBVR,
-				ValueField: encapsulatedFormatIterFromFragments(t, false, []byte{0x12, 0x23}, []byte{0x45, 0x67}),
+				Tag:         PixelDataTag,
+				VR:          OBVR,
+				ValueField:  encapsulatedFormatIterFromFragments(false, fragments...),
+				ValueLength: UndefinedLength,
+			},
+			explicitVRLittleEndian,
+			encapsulatedFormatWithoutOffsetTable,
+		},
+		{
+			"writing EncapsulatedFormatIterator with offset table",
+			&DataElement{
+				Tag:         PixelDataTag,
+				VR:          OBVR,
+				ValueField:  encapsulatedFormatIterFromFragments(true, fragments...),
+				ValueLength: UndefinedLength,
+			},
+			explicitVRLittleEndian,
+			encapsulatedFormatWithOffsetTable,
+		},
+		{
+			"writing NewEncapsulatedFormatBuffer without offset table",
+			&DataElement{
+				Tag:         PixelDataTag,
+				VR:          OBVR,
+				ValueField:  NewEncapsulatedFormatBuffer([]byte{}, fragments...),
+				ValueLength: UndefinedLength,
+			},
+			explicitVRLittleEndian,
+			encapsulatedFormatWithoutOffsetTable,
+		},
+		{
+			"writing NewEncapsulatedFormatBuffer with offset table",
+			&DataElement{
+				Tag:         PixelDataTag,
+				VR:          OBVR,
+				ValueField:  NewEncapsulatedFormatBuffer(offsetTable, fragments...),
+				ValueLength: UndefinedLength,
+			},
+			explicitVRLittleEndian,
+			encapsulatedFormatWithOffsetTable,
+		},
+		{
+			"writing NewEncapsulatedFormatBuffer with odd length fragments",
+			&DataElement{
+				Tag:         PixelDataTag,
+				VR:          OBVR,
+				ValueField:  NewEncapsulatedFormatBuffer([]byte{}, []byte{0x01, 0x02, 0x03}, []byte{0x04, 0x05, 0x06}),
+				ValueLength: UndefinedLength,
 			},
 			explicitVRLittleEndian,
 			[]byte{
@@ -132,40 +225,85 @@ func TestWriteDateElement(t *testing.T) {
 				0xFE, 0xFF, 0x00, 0xE0, // Item Tag
 				0x00, 0x00, 0x00, 0x00, // Item Length
 				0xFE, 0xFF, 0x00, 0xE0, // Item Tag
-				0x02, 0x00, 0x00, 0x00, // Item Length
-				0x12, 0x23, // Fragment Item Bytes
+				0x04, 0x00, 0x00, 0x00, // Item Length
+				0x01, 0x02, 0x03, 0x00, // Fragment Item Bytes
 				0xFE, 0xFF, 0x00, 0xE0, // Item Tag
-				0x02, 0x00, 0x00, 0x00, // Item Length
-				0x45, 0x67, // Fragment Item Bytes
+				0x04, 0x00, 0x00, 0x00, // Item Length
+				0x04, 0x05, 0x06, 0x00, // Fragment Item Bytes
 				0xFE, 0xFF, 0xDD, 0xE0, // Sequence delimitation Tag
 				0x00, 0x00, 0x00, 0x00, // Item Length
 			},
 		},
 		{
-			"writing encapsulated format iterator with offset table",
+			"writing NewBulkDataBuffer of odd length adds padding",
 			&DataElement{
-				Tag:        PixelDataTag,
-				VR:         OBVR,
-				ValueField: encapsulatedFormatIterFromFragments(t, true, []byte{0x12, 0x23}, []byte{0x45, 0x67}),
+				Tag:         PixelDataTag,
+				VR:          OWVR,
+				ValueField:  NewBulkDataBuffer([]byte{0x01, 0x02, 0x03}),
+				ValueLength: 4,
 			},
 			explicitVRLittleEndian,
 			[]byte{
-				0xE0, 0x7F, 0x10, 0x00, // Tag
-				'O', 'B', // VR
-				0x00, 0x00, // Reserved Bytes
-				0xFF, 0xFF, 0xFF, 0xFF, // Undefined Length
-				0xFE, 0xFF, 0x00, 0xE0, // Item Tag
-				0x08, 0x00, 0x00, 0x00, // Item Length
-				0x00, 0x00, 0x00, 0x00, // Offset Table Item 1
-				0x0A, 0x00, 0x00, 0x00, // Offset Table Item 2
-				0xFE, 0xFF, 0x00, 0xE0, // Item Tag
-				0x02, 0x00, 0x00, 0x00, // Item Length
-				0x12, 0x23, // Fragment Item Bytes
-				0xFE, 0xFF, 0x00, 0xE0, // Item Tag
-				0x02, 0x00, 0x00, 0x00, // Item Length
-				0x45, 0x67, // Fragment Item Bytes
-				0xFE, 0xFF, 0xDD, 0xE0, // Sequence delimitation Tag
-				0x00, 0x00, 0x00, 0x00, // Item Length
+				0xE0, 0x7F,
+				0x10, 0x00,
+				'O', 'W',
+				0x00, 0x00,
+				0x04, 0x00, 0x00, 0x00,
+				0x01, 0x02, 0x03, 0x00,
+			},
+		},
+		{
+			"writing NewBulkDataBuffer of even length does not add padding",
+			&DataElement{
+				Tag:         PixelDataTag,
+				VR:          OWVR,
+				ValueField:  NewBulkDataBuffer([]byte{0x01, 0x02}),
+				ValueLength: 2,
+			},
+			explicitVRLittleEndian,
+			[]byte{
+				0xE0, 0x7F,
+				0x10, 0x00,
+				'O', 'W',
+				0x00, 0x00,
+				0x02, 0x00, 0x00, 0x00,
+				0x01, 0x02,
+			},
+		},
+		{
+			"writing NewBulkDataBuffer with multiple frames",
+			&DataElement{
+				Tag:         PixelDataTag,
+				VR:          OBVR,
+				ValueField:  NewBulkDataBuffer([]byte{0x01, 0x02}, []byte{0x03, 0x04}),
+				ValueLength: 4,
+			},
+			explicitVRLittleEndian,
+			[]byte{
+				0xE0, 0x7F,
+				0x10, 0x00,
+				'O', 'B',
+				0x00, 0x00,
+				0x04, 0x00, 0x00, 0x00,
+				0x01, 0x02, 0x03, 0x04,
+			},
+		},
+		{
+			"writing NewBulkDataBuffer with multiple frames and odd overall length",
+			&DataElement{
+				Tag:         PixelDataTag,
+				VR:          OBVR,
+				ValueField:  NewBulkDataBuffer([]byte{0x01, 0x02, 0x03}, []byte{0x04, 0x05}),
+				ValueLength: 6,
+			},
+			explicitVRLittleEndian,
+			[]byte{
+				0xE0, 0x7F,
+				0x10, 0x00,
+				'O', 'B',
+				0x00, 0x00,
+				0x06, 0x00, 0x00, 0x00,
+				0x01, 0x02, 0x03, 0x04, 0x05, 0x00,
 			},
 		},
 	}
@@ -174,6 +312,7 @@ func TestWriteDateElement(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			buff := bytes.NewBuffer([]byte{})
 			w := &dcmWriter{buff}
+
 			if err := writeDataElement(w, tc.syntax, tc.in); err != nil {
 				t.Fatalf("writeDataElement: %v", err)
 			}
@@ -185,42 +324,27 @@ func TestWriteDateElement(t *testing.T) {
 	}
 }
 
-func TestWriteDataElement_unsupported(t *testing.T) {
+func TestNewDataElementWriter_invalidMetaHeaders(t *testing.T) {
 	tests := []struct {
-		name string
-		in   *DataElement
+		name   string
+		header *DataSet
 	}{
 		{
-			"calculating lengths of one shot iterator not supported",
-			&DataElement{
-				Tag:        PixelDataTag,
-				ValueField: oneShotIteratorFromBytes([]byte{1}),
-			},
-		},
-		{
-			"calculating lengths of native multi-frame not supported",
-			&DataElement{
-				Tag:        PixelDataTag,
-				ValueField: mustCreateNativeMultiFrame(t),
-			},
+			"deflated syntax is not supported",
+			&DataSet{Elements: map[DataElementTag]*DataElement{
+				TransferSyntaxUIDTag: &DataElement{
+					Tag:        TransferSyntaxUIDTag,
+					ValueField: []string{DeflatedExplicitVRLittleEndianUID},
+				},
+			}},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			w := &dcmWriter{bytes.NewBuffer([]byte{})}
-			if err := writeDataElement(w, explicitVRLittleEndian, tc.in); err == nil {
-				t.Fatalf("expected error to be returned")
+			if _, err := NewDataElementWriter(bytes.NewBuffer([]byte{}), tc.header); err == nil {
+				t.Fatalf("expected an error to be returned")
 			}
 		})
 	}
-}
-
-func mustCreateNativeMultiFrame(t *testing.T) BulkDataIterator {
-	fragment := oneShotIteratorFromBytes([]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x00})
-	nativeMultiFrame, err := newNativeMultiFrame(fragment, 2, 3)
-	if err != nil {
-		t.Fatalf("newNativeMultiFrame: %v", err)
-	}
-	return nativeMultiFrame
 }

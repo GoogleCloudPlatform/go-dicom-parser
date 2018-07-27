@@ -14,7 +14,9 @@
 
 package dicom
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestLookupTransferSyntax(t *testing.T) {
 	tests := []struct {
@@ -55,5 +57,74 @@ func TestLookupTransferSyntax(t *testing.T) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestImplicitSyntax_ReadVR(t *testing.T) {
+	tests := []struct {
+		name string
+		in   DataElementTag
+		want *VR
+	}{
+		{
+			"private tags return UN VR",
+			DataElementTag(0x12331233),
+			UNVR,
+		},
+		{
+			"public tags are looked up from data dictionary",
+			FileMetaInformationGroupLengthTag,
+			ULVR,
+		},
+		{
+			"when multiple VRs are specified in the data dictionary, the right-most is returned",
+			GrayLookupTableDataTag,
+			OWVR,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := implicitVRLittleEndian.readVR(dcmReaderFromBytes([]byte{}), tc.in)
+			if err != nil {
+				t.Fatalf("reading VR from implicit syntax: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExplicitSyntax_invalidVR(t *testing.T) {
+	dr := dcmReaderFromBytes([]byte("ZZ"))
+	if _, err := explicitVRLittleEndian.readVR(dr, DataElementTag(0)); err == nil {
+		t.Fatalf("expected error to be returned")
+	}
+}
+
+func TestExplicitSyntax_ReadVR(t *testing.T) {
+	tests := []struct {
+		name  string
+		bytes []byte
+		tag   DataElementTag
+		want  *VR
+	}{
+		{
+			"when in the explicit VR syntax, the data dictionary specified VR is ignored",
+			[]byte("UI"),
+			GrayLookupTableDataTag,
+			UIVR,
+		},
+	}
+
+	for _, tc := range tests {
+		vr, err := explicitVRLittleEndian.readVR(dcmReaderFromBytes(tc.bytes), tc.tag)
+		if err != nil {
+			t.Fatalf("readVR(_) => %v", err)
+		}
+		if vr != tc.want {
+			t.Fatalf("got %v, want %v", vr, tc.want)
+		}
 	}
 }

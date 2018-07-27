@@ -74,7 +74,7 @@ func (it *explicitLengthSequenceIterator) Next() (DataElementIterator, error) {
 		}
 	}
 
-	tag, err := processItemTag(it.dr, it.syntax.ByteOrder)
+	tag, err := processItemTag(it.dr, it.syntax.byteOrder())
 	if err == io.EOF {
 		return nil, io.EOF
 	}
@@ -111,7 +111,7 @@ func (it *undefinedLengthSequenceIterator) Next() (DataElementIterator, error) {
 		}
 	}
 
-	tag, err := processItemTag(it.dr, it.syntax.ByteOrder)
+	tag, err := processItemTag(it.dr, it.syntax.byteOrder())
 	if err == io.EOF {
 		return nil, fmt.Errorf("unexpected EOF in undefined sequence")
 	}
@@ -128,7 +128,7 @@ func (it *undefinedLengthSequenceIterator) Next() (DataElementIterator, error) {
 }
 
 func (it *undefinedLengthSequenceIterator) terminate() error {
-	itemLength, err := it.dr.UInt32(it.syntax.ByteOrder)
+	itemLength, err := it.dr.UInt32(it.syntax.byteOrder())
 	if err != nil {
 		return fmt.Errorf("reading 32 bit length of sequence delimitation item: %v", err)
 	}
@@ -164,7 +164,7 @@ func processItemTag(dr *dcmReader, order binary.ByteOrder) (DataElementTag, erro
 }
 
 func newSeqItem(dr *dcmReader, syntax transferSyntax) (DataElementIterator, error) {
-	itemLength, err := dr.UInt32(syntax.ByteOrder)
+	itemLength, err := dr.UInt32(syntax.byteOrder())
 	if err != nil {
 		return nil, fmt.Errorf("reading sequence item length: %v", err)
 	}

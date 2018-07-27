@@ -86,9 +86,9 @@ func TestUTF8Text(t *testing.T) {
 		},
 		{
 			"when a specific character set is encountered, non-text buffers are not modified",
-			&DataElement{PixelDataTag, OWVR, [][]byte{shiftJISBytes}, uint32(len(shiftJISText))},
+			&DataElement{PixelDataTag, OWVR, NewBulkDataBuffer(shiftJISBytes), uint32(len(shiftJISText))},
 			shiftJISTerm,
-			&DataElement{PixelDataTag, OWVR, [][]byte{shiftJISBytes}, uint32(len(shiftJISText))},
+			&DataElement{PixelDataTag, OWVR, NewBulkDataBuffer(shiftJISBytes), uint32(len(shiftJISText))},
 		},
 		{
 			"when a specific character set is encountered, non-text streams are not modified",
@@ -334,15 +334,15 @@ func TestReferenceBulkData(t *testing.T) {
 	}{
 		{
 			"when not bulk data, ValueField is of a buffered type",
-			createDataElement(FileMetaInformationVersionTag, OBVR, createBulkDataIterator(sampleBytes), length),
+			&DataElement{FileMetaInformationVersionTag, OBVR, createBulkDataIterator(sampleBytes), length},
 			binary.LittleEndian,
-			createDataElement(FileMetaInformationVersionTag, OBVR, [][]byte{sampleBytes}, length),
+			&DataElement{FileMetaInformationVersionTag, OBVR, NewBulkDataBuffer(sampleBytes), length},
 		},
 		{
 			"when bulk data, ValueField is of type []ByteFragmentReference",
-			createDataElement(PixelDataTag, OBVR, createBulkDataIterator(sampleBytes), length),
+			&DataElement{PixelDataTag, OBVR, createBulkDataIterator(sampleBytes), length},
 			binary.LittleEndian,
-			createDataElement(PixelDataTag, OBVR, refs, length),
+			&DataElement{PixelDataTag, OBVR, refs, length},
 		},
 	}
 
@@ -365,13 +365,13 @@ func TestDropGroupLengths(t *testing.T) {
 	}{
 		{
 			"a group length element is filtered",
-			createDataElement(0x00020000, OBVR, []byte{}, 0),
+			&DataElement{0x00020000, OBVR, []byte{}, 0},
 			nil,
 		},
 		{
 			"non-group length elements are not filtered",
-			createDataElement(0x00020001, ULVR, []uint32{}, 0),
-			createDataElement(0x00020001, ULVR, []uint32{}, 0),
+			&DataElement{0x00020001, ULVR, []uint32{}, 0},
+			&DataElement{0x00020001, ULVR, []uint32{}, 0},
 		},
 	}
 
@@ -394,21 +394,23 @@ func TestDropBasicOffsetTable(t *testing.T) {
 	}{
 		{
 			"the offset table is dropped for the encapsulated format",
-			createDataElement(PixelDataTag, OBVR, encapsulatedFormatIterFromFragments(t, true, sampleBytes), UndefinedLength),
-			createDataElement(PixelDataTag, OBVR, oneShotIteratorFromBytes(sampleBytes), UndefinedLength),
+			&DataElement{PixelDataTag, OBVR, encapsulatedFormatIterFromFragments(true, sampleBytes), UndefinedLength},
+			&DataElement{PixelDataTag, OBVR, encapsulatedFormatBuffer([][]byte{sampleBytes}), UndefinedLength},
 		},
 		{
 			"pixel data of non-encapsulated formats are not modified",
-			createDataElement(PixelDataTag, OBVR, oneShotIteratorFromBytes(sampleBytes), uint32(len(sampleBytes))),
-			createDataElement(PixelDataTag, OBVR, oneShotIteratorFromBytes(sampleBytes), uint32(len(sampleBytes))),
+			&DataElement{PixelDataTag, OBVR, oneShotIteratorFromBytes(sampleBytes), uint32(len(sampleBytes))},
+			&DataElement{PixelDataTag, OBVR, oneShotIteratorFromBytes(sampleBytes), uint32(len(sampleBytes))},
 		},
 	}
 	for _, tc := range tests {
-		got, err := DropBasicOffsetTable.transform(tc.in)
-		if err != nil {
-			t.Fatalf("DropBasicOffsetTable.Transform(_) => %v", err)
-		}
-		compareDataElements(got, tc.want, binary.LittleEndian, t)
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := DropBasicOffsetTable.transform(tc.in)
+			if err != nil {
+				t.Fatalf("DropBasicOffsetTable.Transform(_) => %v", err)
+			}
+			compareDataElements(got, tc.want, binary.LittleEndian, t)
+		})
 	}
 }
 
@@ -468,7 +470,7 @@ func ExampleParseOption() {
 		return
 	}
 
-	excludeFileMetaElements := WithTransform(func(element *DataElement) (*DataElement, error) {
+	excludeFileMetaElements := ParseOptionWithTransform(func(element *DataElement) (*DataElement, error) {
 		if element.Tag.GroupNumber() == 0x0002 {
 			return nil, nil // exclude meta element by transforming it to nil
 		}
@@ -489,9 +491,9 @@ func ExampleParseOption() {
 }
 
 func createCharacterSetElement(term string) *DataElement {
-	return createDataElement(SpecificCharacterSetTag, SpecificCharacterSetTag.DictionaryVR(), strings.Split(term, "\\"), uint32(len(term)))
+	return &DataElement{SpecificCharacterSetTag, SpecificCharacterSetTag.DictionaryVR(), strings.Split(term, "\\"), uint32(len(term))}
 }
 
 func createBulkDataIterator(b []byte) BulkDataIterator {
-	return newOneShotIterator(countReaderFromBytes(b))
+	return NewBulkDataIterator(bytes.NewReader(b), 0)
 }

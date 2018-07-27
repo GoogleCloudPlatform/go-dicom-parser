@@ -24,7 +24,7 @@ import (
 )
 
 func readDataElement(dr *dcmReader, syntax transferSyntax) (*DataElement, error) {
-	tag, err := dr.Tag(syntax.ByteOrder)
+	tag, err := dr.Tag(syntax.byteOrder())
 	if err == io.EOF {
 		return nil, io.EOF
 	}
@@ -35,7 +35,7 @@ func readDataElement(dr *dcmReader, syntax transferSyntax) (*DataElement, error)
 	if tag == ItemDelimitationItemTag {
 		// handles the case when we are parsing a nested data set within a sequence with undefined
 		// length. This code should never run for the top level data set
-		length, err := dr.UInt32(syntax.ByteOrder)
+		length, err := dr.UInt32(syntax.byteOrder())
 		if err != nil {
 			return nil, fmt.Errorf("reading 32 bit length of item delimitation: %v", err)
 		}
@@ -45,12 +45,12 @@ func readDataElement(dr *dcmReader, syntax transferSyntax) (*DataElement, error)
 		return nil, io.EOF
 	}
 
-	vr, err := readVR(dr, tag, syntax)
+	vr, err := syntax.readVR(dr, tag)
 	if err != nil {
 		return nil, fmt.Errorf("getting vr %v", err)
 	}
 
-	length, err := readValueLength(dr, vr, syntax)
+	length, err := syntax.readValueLength(dr, vr)
 	if err != nil {
 		return nil, fmt.Errorf("getting length: %v", err)
 	}
@@ -63,50 +63,17 @@ func readDataElement(dr *dcmReader, syntax transferSyntax) (*DataElement, error)
 	return &DataElement{tag, vr, value, length}, nil
 }
 
-func readValueLength(dr *dcmReader, vr *VR, syntax transferSyntax) (uint32, error) {
-	if syntax.Implicit {
-		return dr.UInt32(syntax.ByteOrder)
-	}
-
-	// For explicit VR, lengths can be stored in a 32 bit field or a 16 bit field
-	// depending on the VR type. The 2 cases are defined at the link:
-	// http://dicom.nema.org/medical/dicom/current/output/html/part05.html#sect_7.1.2
-
-	switch vr {
-	case OBVR, ODVR, OFVR, OLVR, OWVR, SQVR, UCVR, URVR, UTVR, UNVR:
-		// case 1: 32-bit length
-		if _, err := dr.UInt16(syntax.ByteOrder); err != nil {
-			return 0, fmt.Errorf("reading reserved field %v", err)
-		}
-
-		length, err := dr.UInt32(syntax.ByteOrder)
-		if err != nil {
-			return 0, fmt.Errorf("reading 32 bit length: %v", err)
-		}
-
-		return length, nil
-	}
-
-	// case 2: read 16-bit length
-	length, err := dr.UInt16(syntax.ByteOrder)
-	if err != nil {
-		return 0, fmt.Errorf("reading 16 bit length: %v", err)
-	}
-
-	return uint32(length), nil
-}
-
 func readValue(tag DataElementTag, dr *dcmReader, vr *VR, length uint32, syntax transferSyntax) (interface{}, error) {
 	switch vr.kind {
 	case textVR:
 		return readText(dr, length, vr, unicode.IsSpace)
 	case numberBinaryVR:
-		return readNumberBinary(dr, length, vr, syntax.ByteOrder)
+		return readNumberBinary(dr, length, vr, syntax.byteOrder())
 	case bulkDataVR:
 		return readBulkData(dr, tag, length)
 	case uniqueIdentifierVR:
 		return readText(dr, length, vr, func(r rune) bool {
-			return r == 0x00
+			return r == 0x00 || r == ' '
 		})
 	case sequenceVR:
 		return readSequence(dr, length, syntax)
@@ -121,7 +88,7 @@ func readTag(dr *dcmReader, syntax transferSyntax, length uint32) ([]uint32, err
 	ret := make([]uint32, length/4) // 4 bytes per tag
 
 	for i := range ret {
-		t, err := dr.Tag(syntax.ByteOrder)
+		t, err := dr.Tag(syntax.byteOrder())
 		if err != nil {
 			return nil, err
 		}
@@ -184,29 +151,17 @@ func readBulkData(dr *dcmReader, tag DataElementTag, length uint32) (BulkDataIte
 		if tag == PixelDataTag {
 			// Specified in http://dicom.nema.org/medical/dicom/current/output/html/part05.html#sect_A.4
 			// (7FE0,0010) and undefined length means pixel data in encapsulated (compressed) format
-			return newEncapsulatedFormatIterator(dr)
+			return NewEncapsulatedFormatIterator(dr.cr, dr.cr.bytesRead), nil
 		}
 
 		return nil, errors.New("syntax with undefined length in non-pixel data not supported")
 	}
 
 	// for native (uncompressed) formats, return regular bulk data stream
-	return newOneShotIterator(limitCountReader(dr.cr, int64(length))), nil
+	limitedReader := limitCountReader(dr.cr, int64(length))
+	return NewBulkDataIterator(limitedReader, dr.cr.bytesRead), nil
 }
 
 func readSequence(dr *dcmReader, length uint32, syntax transferSyntax) (SequenceIterator, error) {
 	return newSequenceIterator(dr, length, syntax)
-}
-
-func readVR(dr *dcmReader, tag DataElementTag, syntax transferSyntax) (*VR, error) {
-	if syntax.Implicit {
-		return tag.DictionaryVR(), nil
-	}
-
-	vrString, err := dr.String(2)
-	if err != nil {
-		return nil, fmt.Errorf("getting vr %v", vrString)
-	}
-
-	return lookupVRByName(vrString)
 }

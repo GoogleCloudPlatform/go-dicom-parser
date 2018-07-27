@@ -15,6 +15,7 @@
 package dicom
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -30,6 +31,103 @@ type BulkDataReference struct {
 type ByteRegion struct {
 	Offset int64
 	Length int64
+}
+
+// BulkDataBuffer represents a contiguous sequence of bytes buffered into memory from a file
+type BulkDataBuffer interface {
+	DataElementValue
+
+	// Data returns a reference to the underlying data in the BulkDataBuffer. Implementations shall
+	// guarantee O(1) complexity.
+	Data() [][]byte
+
+	// Length returns the total length of this bulk data.
+	// Will *not* add a padding byte.
+	// May return UndefinedLength for encapsulated data. Always returns >= 0 with
+	// 0 indicating an empty buffer.
+	Length() int64
+
+	write(w io.Writer, syntax transferSyntax) error
+}
+
+// NewBulkDataBuffer returns a DataElementValue representing a raw sequence of bytes.
+func NewBulkDataBuffer(b ...[]byte) BulkDataBuffer {
+	return bytesValue(b)
+}
+
+// NewEncapsulatedFormatBuffer returns a DataElementValue representing the encapsulated image
+// format. The offset table is assumed to be the basic offset table fragment and fragments is
+// assumed to be the remaining image fragments (excluding the basic offset table fragment). To
+// specify no offsetTable, offsetTable can be set to an empty slice.
+func NewEncapsulatedFormatBuffer(offsetTable []byte, fragments ...[]byte) BulkDataBuffer {
+	buff := [][]byte{offsetTable}
+
+	for _, fragment := range fragments {
+		buff = append(buff, fragment)
+	}
+
+	return encapsulatedFormatBuffer(buff)
+}
+
+type bytesValue [][]byte
+
+func (b bytesValue) write(w io.Writer, syntax transferSyntax) error {
+	totalLength := b.Length()
+
+	idx := 0
+	return writeByteFragments(w, func() (io.Reader, error) {
+		if idx >= len(b) {
+			return nil, io.EOF
+		}
+
+		r := bytes.NewReader(b[idx])
+		if idx == len(b)-1 && totalLength%2 != 0 {
+			// To achieve even length, append trailing null byte to the last fragment.
+			r = bytes.NewReader(append(b[idx], 0x00))
+		}
+
+		idx++
+		return r, nil
+	})
+}
+
+func (b bytesValue) Data() [][]byte {
+	return b
+}
+
+func (b bytesValue) Length() int64 {
+	totalLength := 0
+	for _, fragment := range b {
+		totalLength += len(fragment)
+	}
+	return int64(totalLength)
+}
+
+type encapsulatedFormatBuffer [][]byte
+
+func (b encapsulatedFormatBuffer) write(w io.Writer, syntax transferSyntax) error {
+	idx := 0
+	return writeEncapsulatedFormat(w, syntax.byteOrder(), func() (io.Reader, error) {
+		if idx >= len(b) {
+			return nil, io.EOF
+		}
+
+		r := bytes.NewReader(b[idx])
+		if len(b[idx])%2 != 0 {
+			r = bytes.NewReader(append(b[idx], 0x00))
+		}
+
+		idx++
+		return r, nil
+	})
+}
+
+func (b encapsulatedFormatBuffer) Data() [][]byte {
+	return b
+}
+
+func (b encapsulatedFormatBuffer) Length() int64 {
+	return UndefinedLength
 }
 
 // BulkDataReader represents a streamable contiguous sequence of bytes within a file
@@ -58,17 +156,55 @@ type BulkDataIterator interface {
 	// BulkDataReaders from calls to Next are also emptied.
 	Close() error
 
+	// ToBuffer converts the BulkDataIterator into its equivalent BulkDataBuffer. Behaviour after
+	// Next has been called is undefined. This will close the iterator.
+	ToBuffer() (BulkDataBuffer, error)
+
+	// Length returns the total length of this BulkData.
+	// Will *not* add a padding byte.
+	// May return -1 if length is unknown or UndefinedLength for encapsulate
+	// data. Required to be >= 0 when Constructing a DataSet with a
+	// BulkDataIterator. See specific implementations for how to specify
+	// explicit length.
+	Length() int64
+
 	write(w io.Writer, syntax transferSyntax) error
+}
+
+// NewEncapsulatedFormatIterator returns an iterator over byte fragments. r must read the ValueField
+// of a DataElement in the encapsulated format as described in the DICOM standard part5 linked
+// below. offset is the number of bytes preceding the ValueField in the DICOM file.
+// http://dicom.nema.org/medical/dicom/current/output/html/part05.html#sect_A.4
+func NewEncapsulatedFormatIterator(r io.Reader, offset int64) BulkDataIterator {
+	dr := &dcmReader{cr: &countReader{r: r, bytesRead: offset}}
+	return &encapsulatedFormatIterator{dr, nil, false}
+}
+
+// NewBulkDataIterator returns a BulkDataIterator with a single BulkDataReader
+// described by r and offset. Offset can safely be set to 0 with the
+// understanding that the BulkDataReaders won't have the proper offset set.
+func NewBulkDataIterator(r io.Reader, offset int64) BulkDataIterator {
+	cr := &countReader{r: r, bytesRead: offset}
+	return &oneShotIterator{cr: cr, empty: false, length: -1}
+}
+
+// NewBulkDataIteratorWithLength returns a BulkDataIterator with an explicit
+// length. A length is required when Constructing a DataSet and native bulk
+// data must write out an explicit length before the bulk data.
+func NewBulkDataIteratorWithLength(r io.Reader, offset, length int64) BulkDataIterator {
+	cr := &countReader{r: r, bytesRead: offset}
+	return &oneShotIterator{cr: cr, empty: false, length: length}
 }
 
 // oneShotIterator is a BulkDataIterator that contains exactly one BulkDataReader
 type oneShotIterator struct {
 	cr    *countReader
 	empty bool
-}
 
-func newOneShotIterator(r *countReader) BulkDataIterator {
-	return &oneShotIterator{r, false}
+	// The length of the underlying data. Might not be available after parsing
+	// but needs to be present to be able to Construct a DataSet without buffering
+	// the whole reader into memory.
+	length int64
 }
 
 func (it *oneShotIterator) Next() (*BulkDataReader, error) {
@@ -91,6 +227,18 @@ func (it *oneShotIterator) Close() error {
 	return nil
 }
 
+func (it *oneShotIterator) ToBuffer() (BulkDataBuffer, error) {
+	b, err := ioutil.ReadAll(it.cr)
+	if err != nil {
+		return nil, fmt.Errorf("collecting fragments into memory: %v", err)
+	}
+	return NewBulkDataBuffer(b), nil
+}
+
+func (it *oneShotIterator) Length() int64 {
+	return it.length
+}
+
 func (it *oneShotIterator) write(w io.Writer, syntax transferSyntax) error {
 	return writeByteFragments(w, func() (io.Reader, error) {
 		return it.Next()
@@ -103,10 +251,6 @@ type encapsulatedFormatIterator struct {
 	dr            *dcmReader
 	currentReader *BulkDataReader
 	empty         bool
-}
-
-func newEncapsulatedFormatIterator(dr *dcmReader) (BulkDataIterator, error) {
-	return &encapsulatedFormatIterator{dr, nil, false}, nil
 }
 
 // Next returns the next fragment of the pixel data. The first return from Next will be the
@@ -160,12 +304,23 @@ func (it *encapsulatedFormatIterator) Close() error {
 	return nil
 }
 
+func (it *encapsulatedFormatIterator) ToBuffer() (BulkDataBuffer, error) {
+	fragments, err := CollectFragments(it)
+	if err != nil {
+		return nil, fmt.Errorf("collecting fragments of encapsulated format: %v", err)
+	}
+	return encapsulatedFormatBuffer(fragments), nil
+}
+
+func (it *encapsulatedFormatIterator) Length() int64 {
+	return UndefinedLength
+}
+
 func (it *encapsulatedFormatIterator) write(w io.Writer, syntax transferSyntax) error {
-	return writeEncapsulatedFormat(w, syntax.ByteOrder, func() (io.Reader, error) {
+	return writeEncapsulatedFormat(w, syntax.byteOrder(), func() (io.Reader, error) {
 		return it.Next()
 	})
 }
-
 
 func (it *encapsulatedFormatIterator) terminate() error {
 	_, err := it.dr.UInt32(binary.LittleEndian)

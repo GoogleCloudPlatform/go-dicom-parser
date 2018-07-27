@@ -19,8 +19,49 @@ import (
 	"encoding/binary"
 	"io"
 	"io/ioutil"
+	"reflect"
 	"testing"
 )
+
+func TestNewBulkDataBuffer_offsets(t *testing.T) {
+	offset := int64(5)
+	iter := NewBulkDataIterator(bytes.NewBuffer(sampleBytes), offset)
+	r, err := iter.Next()
+	if err != nil {
+		t.Fatalf("BulkDataIterator.Next => %v", err)
+	}
+	if got := r.Offset; got != offset {
+		t.Fatalf("got %v, want %v", got, offset)
+	}
+}
+
+func TestNewEncapsulatedFormatIterator_offsets(t *testing.T) {
+	offset := int64(10)
+	fragments := [][]byte{{2, 3}, {4, 5, 6, 7}}
+	valueField := encapsulatedFormatBytes(false, fragments...)
+	iter := NewEncapsulatedFormatIterator(bytes.NewReader(valueField), offset)
+
+	wantOffset := int64(offset)
+
+	for fragment, err := iter.Next(); err != io.EOF; fragment, err = iter.Next() {
+		if err != nil {
+			t.Fatalf("Next on iterator: %v", err)
+		}
+
+		wantOffset += 4 /*item tag*/ + 4 /*item length*/
+
+		if got := fragment.Offset; got != wantOffset {
+			t.Fatalf("got %v, want %v", got, wantOffset)
+		}
+
+		fragmentLength, err := io.Copy(ioutil.Discard, fragment)
+		if err != nil {
+			t.Fatalf("reading fragment: %v", err)
+		}
+
+		wantOffset += fragmentLength
+	}
+}
 
 func TestOneShotIterator_Next(t *testing.T) {
 	iter := oneShotIteratorFromBytes(sampleBytes)
@@ -79,10 +120,22 @@ func TestOneShotIterator_CloseAfterNext(t *testing.T) {
 	}
 }
 
+func TestOneShotIterator_ToBuffer(t *testing.T) {
+	iter := oneShotIteratorFromBytes(sampleBytes)
+	b, err := iter.ToBuffer()
+	if err != nil {
+		t.Fatalf("toBuffer: %v", err)
+	}
+	want := bytesValue([][]byte{sampleBytes})
+	if !reflect.DeepEqual(b, want) {
+		t.Fatalf("got %v, want %v", b, want)
+	}
+}
+
 func TestEncapsulatedFormatIterator_OffsetTablePresent(t *testing.T) {
 	// test behavior of encapsulated pixel data value field as described in
 	// http://dicom.nema.org/medical/dicom/current/output/html/part05.html#sect_A.4
-	iter := encapsulatedFormatIterFromFragments(t, true, sampleBytes)
+	iter := encapsulatedFormatIterFromFragments(true, sampleBytes)
 	r, err := iter.Next()
 	if err != nil {
 		t.Fatalf("unexpected error retreiving offset table: %v", err)
@@ -97,7 +150,7 @@ func TestEncapsulatedFormatIterator_OffsetTablePresent(t *testing.T) {
 }
 
 func TestEncapsulatedFormatIterator_OffsetTableNotPresent(t *testing.T) {
-	iter := encapsulatedFormatIterFromFragments(t, false, sampleBytes)
+	iter := encapsulatedFormatIterFromFragments(false, sampleBytes)
 	r, err := iter.Next()
 	if err != nil {
 		t.Fatalf("error getting empty offset table: %v", err)
@@ -113,7 +166,7 @@ func TestEncapsulatedFormatIterator_OffsetTableNotPresent(t *testing.T) {
 }
 
 func TestEncapsulatedFormatIterator_Next_EndsWithEOF(t *testing.T) {
-	iter := encapsulatedFormatIterFromFragments(t, false, sampleBytes)
+	iter := encapsulatedFormatIterFromFragments(false, sampleBytes)
 	iter.Next() // skip offset table
 	_, err := iter.Next()
 	if err != nil {
@@ -129,7 +182,7 @@ func TestEncapsulatedFormatIterator_Next_MultiFragments(t *testing.T) {
 	frag1 := []byte{1, 2, 3, 4}
 	frag2 := []byte{5, 6, 7, 8, 9, 10}
 	fragments := [][]byte{frag1, frag2}
-	iter := encapsulatedFormatIterFromFragments(t, false, frag1, frag2)
+	iter := encapsulatedFormatIterFromFragments(false, frag1, frag2)
 
 	iter.Next() // skip offset table
 	for i := 0; i < 2; i++ {
@@ -148,7 +201,7 @@ func TestEncapsulatedFormatIterator_Next_MultiFragments(t *testing.T) {
 }
 
 func TestEncapsulatedFormatIterator_Next_PreviousFragmentsInvalidated(t *testing.T) {
-	iter := encapsulatedFormatIterFromFragments(t, false, []byte{0, 1}, []byte{2, 3})
+	iter := encapsulatedFormatIterFromFragments(false, []byte{0, 1}, []byte{2, 3})
 	iter.Next() // skip offset table
 	previousFragment, err := iter.Next()
 	if err != nil {
@@ -167,7 +220,7 @@ func TestEncapsulatedFormatIterator_Next_PreviousFragmentsInvalidated(t *testing
 }
 
 func TestEncapsulatedFormatIterator_Close(t *testing.T) {
-	pd := encapsulatedFormatIterFromFragments(t, false, sampleBytes)
+	pd := encapsulatedFormatIterFromFragments(false, sampleBytes)
 	pd.Next() // skip offset table
 	if err := pd.Close(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -178,7 +231,46 @@ func TestEncapsulatedFormatIterator_Close(t *testing.T) {
 	}
 }
 
-func encapsulatedFormatIterFromFragments(t *testing.T, includeOffsetTable bool, fragments ...[]byte) BulkDataIterator {
+func TestNewEncapsulatedFormat_ToBuffer(t *testing.T) {
+	fragments := [][]byte{{1, 2}, {3, 4}}
+	offsetTable := []byte{0x00, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00}
+
+	tests := []struct {
+		name string
+		in   BulkDataIterator
+		want BulkDataBuffer
+	}{
+		{
+			"to buffer with offset table",
+			encapsulatedFormatIterFromFragments(true, fragments...),
+			NewEncapsulatedFormatBuffer(offsetTable, fragments...),
+		},
+		{
+			"to buffer without offset table",
+			encapsulatedFormatIterFromFragments(false, fragments...),
+			NewEncapsulatedFormatBuffer([]byte{}, fragments...),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.in.ToBuffer()
+			if err != nil {
+				t.Fatalf("ToBuffer: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func encapsulatedFormatIterFromFragments(includeOffsetTable bool, fragments ...[]byte) BulkDataIterator {
+	data := encapsulatedFormatBytes(includeOffsetTable, fragments...)
+	return NewEncapsulatedFormatIterator(bytes.NewReader(data), 0)
+}
+
+func encapsulatedFormatBytes(includeOffsetTable bool, fragments ...[]byte) []byte {
 	// http://dicom.nema.org/medical/dicom/current/output/html/part05.html#sect_A.4 for documentation
 	// of the offset table and encapsulated format
 
@@ -217,14 +309,9 @@ func encapsulatedFormatIterFromFragments(t *testing.T, includeOffsetTable bool, 
 	data = append(data, delimiter...)
 	data = append(data, []byte{0, 0, 0, 0}...)
 
-	ret, err := newEncapsulatedFormatIterator(dcmReaderFromBytes(data))
-	if err != nil {
-		t.Fatalf("unexpected error creating encapsulated format iterator: %v", err)
-	}
-
-	return ret
+	return data
 }
 
 func oneShotIteratorFromBytes(data []byte) BulkDataIterator {
-	return newOneShotIterator(countReaderFromBytes(data))
+	return NewBulkDataIterator(bytes.NewReader(data), 0)
 }
